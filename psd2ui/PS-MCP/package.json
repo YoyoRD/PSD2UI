@@ -1,0 +1,18 @@
+{
+  "name": "@yoyoengine/psd2ui-ps-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "PSD2UI 的可选 MCP 操作层；默认连接 CEP 面板，显式保留 UXP/UDT 宿主。",
+  "scripts": {
+    "start": "node src/server.js",
+    "call": "node scripts/call-tool.js",
+    "check": "node --check src/commandService.js && node --check src/hostBridge.js && node --check src/cepTransport.js && node --check src/server.js && node --check scripts/call-tool.js && node --check ../scripts/uxp-devtools-runner.js && node --check ../scripts/udt-service-manager.js && node --check ../scripts/udt-background-service.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.4.3",
+    "@modelcontextprotocol/client": "^2.0.0"
+  }
+}

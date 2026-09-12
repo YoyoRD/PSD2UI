@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExtensionManifest Version="7.0" ExtensionBundleId="com.yoyoengine.psd2ui.cep" ExtensionBundleVersion="0.3.8" ExtensionBundleName="PSD2UI by YoyoRD">
+  <ExtensionList><Extension Id="com.yoyoengine.psd2ui.cep.panel" Version="0.3.8"/></ExtensionList>
+  <ExecutionEnvironment>
+    <HostList><Host Name="PHSP" Version="[20.0,99.9]"/><Host Name="PHXS" Version="[20.0,99.9]"/></HostList>
+    <LocaleList><Locale Code="All"/></LocaleList>
+    <RequiredRuntimeList><RequiredRuntime Name="CSXS" Version="9.0"/></RequiredRuntimeList>
+  </ExecutionEnvironment>
+  <DispatchInfoList><Extension Id="com.yoyoengine.psd2ui.cep.panel"><DispatchInfo>
+    <Resources>
+      <MainPath>./index.html</MainPath><ScriptPath>./host/photoshop.jsx</ScriptPath>
+      <CEFCommandLine><Parameter>--enable-nodejs</Parameter><Parameter>--mixed-context</Parameter></CEFCommandLine>
+    </Resources>
+    <Lifecycle><AutoVisible>true</AutoVisible></Lifecycle>
+    <UI><Type>Panel</Type><Menu>PSD2UI</Menu><Geometry><Size><Width>380</Width><Height>820</Height></Size><MinSize><Width>280</Width><Height>420</Height></MinSize></Geometry></UI>
+  </DispatchInfo></Extension></DispatchInfoList>
+</ExtensionManifest>

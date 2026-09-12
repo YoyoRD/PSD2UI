@@ -1,225 +1,98 @@
-# PSD2UGUI
+# PSD2UGUI · CEP 9
 
-## 说在前面
+将 PSD2UI 的 Photoshop 插件迁入原 PSD2UGUI 仓库：在 PSD 中配置组件、角色、列表模板和视觉状态，导出供引擎消费的 JSON 与 PNG。
 
-- 项目开发思路来源于 [quick_psd2UGUI](https://github.com/zs9024/quick_psd2ugui) ,是在此之上结合项目的扩展。
-- 不得不说，PSD转Prefab的沟通成本是真的高，所以指望一套成熟的方案解决需求，大概率是不太行的。成本在美术那边没有程序思维。小厂大家都熟沟通起来方便还行，大厂简直要命，特别是流动的美术中心，真心推不动。
-- 工程经历了小厂的一个项目开发，命名规则尽量简化了，自定义的内容基本上都抽成常量，方便修改。
-- 本方案只做参考，除非用配套的[UI框架](https://gitee.com/Yoyo21/game-frame/tree/master/UGUIFrame)
+当前分支是 **CEP 主版本**。面向 Photoshop CC 2019 的 CEP 9 宿主，普通美术使用不需要 Creative Cloud Desktop、UDT、外部 Node.js 或 AI。
 
----
+**Adapters 不迁移。** 原 YoyoUI、SGUI Adapter 与各自 UI 框架、程序集和业务路由紧密绑定。本仓库可以完成 Photoshop 端配置和资源导出，**不提供开箱即用的 Unity Prefab 生成器**。Unity 接入缺口与最小实现顺序见 [Unity 接入说明](docs/UNITY-INTEGRATION.md)。
 
-## 解决问题
+## 两个版本
 
-- 解决手动构建prefab的弊端，采用自动化处理psd文件生成prefab。
-- 根据命名，生成图集。
+| 分支 | 插件 | 宿主与安装方式 |
+| --- | --- | --- |
+| [main](https://github.com/YoyoRD/PSD2UGUI/tree/main)（主分支） | CEP 0.3.8 | Windows PS 20.0.4 / CC 2019 目标基线；签名 ZXP / 安装 ZIP |
+| [ccx](https://github.com/YoyoRD/PSD2UGUI/tree/ccx) | UXP 0.2.0 | Photoshop 25.0+；UDT 开发加载 / CCX 安装 |
 
----
+两者来自 PSD2UI 各自的已有分支，并非同一插件改后缀。迁移提交、文件一致性清单和排除项见 [迁移记录](docs/MIGRATION.md)。本次仅迁移源码、已有生成面板和安装脚本，整理分发配置与文档；没有运行构建、测试或实机验收，没有发布新的安装附件。
 
-## 自动化与半自动化
+## 从源码运行 CEP
 
-- 看项目组人员结构去选择，有时候工具化没法做全自动，实属无奈。
+仓库已包含生成好的 CEP 面板，不必先安装 Node 或重新构建。以下操作在 Windows 上执行：
 
-### 自动化
+1. 获取主分支，在仓库根打开 PowerShell：
 
-- 自动化的概念是指，处理PSD的统一入口是在发版机，也就是有一个集成CI。由发版机去打包模块的Psd文件，然后客户端在update，从而得到prefab。
-- 自动化就把打包这个过程从本地机移植到发版机，就不用装PS，只需要提交模块打包的命令。
-- 自动化代码由Python编写，不管是Jenkins 或者 TeamCity 都可以方便集成
+   ```powershell
+   git clone --branch main https://github.com/YoyoRD/PSD2UGUI.git
+   cd PSD2UGUI
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\psd2ui\scripts\package-cep.ps1 -SkipBuild
+   ```
 
-### 半自动化
+   此命令只对现有生成面板打包签名。首次会下载并校验 Adobe ZXPSignCmd，创建本机开发自签名证书；需要联网下载工具。证书和密码留在被忽略的 .tmp 中，不应随源码或安装包分发。
 
-- 半自动化指手动管理图集，手动在ps里面导出需要的xml，手动生成Prefab。
-- 基本上这个流程由程序执行，但是胜于可控性高，沟通成本就少很多。
+2. 在 `psd2ui/dist/` 找到 `PSD2UI-CEP-0.3.8-Windows-Install-r2.zip`，**完整解压到独立目录**。不要直接运行源码目录的 Install.cmd，它需要打包时生成的签名目录与清单。
+3. 关闭 Photoshop，双击解压目录里的 `Install.cmd`。安装至当前用户的 `%APPDATA%\Adobe\CEP\extensions\com.yoyoengine.psd2ui.cep`；已有安装会由安装器备份。
+4. 启动 Photoshop，从「窗口 → 扩展功能 → PSD2UI」打开面板。使用时保持面板打开。
 
----
+如果已经拿到维护者生成的完整安装 ZIP，直接从第 2 步开始，可离线安装。打包得到的另一份 `.zxp` 是签名原包，不要改后缀当成 CCX。签名包无需设置 PlayerDebugMode；自签名不代表 Adobe 审核。
 
-## 如何开始
+[CEP 安装、源码构建与限制](psd2ui/Plus-ins/PSD2UI-CEP/README.md) · [签名与分发](psd2ui/scripts/CEP-DISTRIBUTION.md)
 
-- 将脚本文件 Export PSDUI.jsx拷贝至“ps安装目录\Presets\Scripts”目录下，如：“E:\Program Files\PS\Adobe Photoshop CS6 (64 Bit)\Presets\Scripts”。
-- 打开一个psd文件，在cs6中选择“文件->脚本->Export PSDUI”，会弹框选择一个目录，存放脚本运行时的切图和配置文件(xml)。
-- 将上一步生成的切图和配置拷贝到unity中，在菜单栏选择quicktool/psdimport执行，弹框选择上一步导出的xml文件，将在hierarchy中生成ugui面板
+清单允许的 Photoshop 版本范围比目标基线宽，这不是所有版本兼容承诺。本次未在 PS 20.0.4 或其他版本重新实机验证。
 
-### 提示
+## 第一次导出
 
-- 使用编辑器修改或调试ps脚本：找到或下载编辑器adobe extendscript toolkit，一般都在C盘，如C:\Program Files (x86)\Adobe\Adobe Utilities - CS6\ExtendScript Toolkit CS6， file/open打开文件“ps安装目录\Presets\Scripts\Export PSDUI.jsx”，目标应用选择“Adobe Photoshop CS6”，就可以断点调试运行了
-- 如果运行ps脚本时出现错误“合并可见图层当前不可用”，可以检查是否有单个图片(比如背景图)位于根节点的最后，并将其移到某个图层组下面，具体见文档
-- ps cc版本报错“错误8800...sceneData += "" + obj.textItem.color.rgb.hexValue + "";”时，可检查text是不是包含了多个色值，要用单色，多色在unity里自己用richtext的color实现
-- 有问题或者建议、想法可以加QQ群654564220讨论
-- 以上内容我就不改了，尊重原作者。
+1. 打开已保存的本地 PSD，进入「准备 PSD」，填写项目约定的界面所属模块，保存配置。
+2. 普通图片和文字可自动读取。需要按钮、输入框、开关、列表等结构时，选择对应组并配置角色、模板及预览。复杂组件从内部向外配置。
+3. 图片沿用正式基础名，例如 `comm_bt_0032`；组和文字可用中文。旧 `@...` 后缀被忽略，不再作为功能指令。首次配置或导出会准备文档身份。
+4. 在「检查导出」选择一个可写的交付目录，处理面板报告的问题，执行「导出 JSON 与图片」。
 
-### 注意事项
+```text
+交付目录/
+  json/界面名.psd2ui.json
+  sprite/comm/comm_bt_0032.png
+  texture/comm/comm_bg_0002.png
+```
 
-- 在PSD文件内，最外层添加一个组，组名为 PSD文件名 + @ 模块名 。如下图：
-- ![image-20210112150032947](https://gitee.com/Yoyo21/image-hosting/raw/master/img/image-20210112150032947.png)
-- 两种情况下会分开 几个PSD文件
-  - 1.存在列表(List)的时候，列表内的项 需要新建一个新的PSD文件
-  - 2.存在切换页面，被切换的页面需要 新建一个PSD文件 
-- 需要显示 但不需要导出的内容 则可以加入 @null
-  - ![image-20210112150613236](https://gitee.com/Yoyo21/image-hosting/raw/master/img/image-20210112150613236.png)
+图片按自身 kind/module 归档，文件夹名称不必是 UIRes。配置写在 PSD 内嵌 XMP，并同步到 PSD 旁的 `<PSD名>.psd2ui.authoring.json`；它与交付 Bundle 用途不同，不要直接编辑该镜像代替面板配置。
 
----
+完整操作见 [美术工作流](psd2ui/docs/ARTIST_WORKFLOW.md)、[图片尺寸规范](psd2ui/docs/IMAGE_SIZE_STANDARD.md)和 [数据契约](psd2ui/Contracts/README.md)。
 
-## 命名规则
+## 可选 AI / MCP
 
-### 文本
+只手动用面板可跳过。默认连接已经打开的 CEP 面板。Windows 自带 PowerShell 5.1 即可，Node.js 仅供外部 MCP 使用。 外部 Node 需满足本分支脚本要求（20.x 至少 20.19，22.x 至少 22.12，或更新的受支持版本）。
 
-- 不需要任何图层管理，直接放即可。
-  - ![image-20210112150845517](https://gitee.com/Yoyo21/image-hosting/raw/master/img/image-20210112150845517.png)
-- 如果文字是需要导出图片，则在后面加入_wztp （文字图片的拼音）
-  - ![image-20210112151046946](https://gitee.com/Yoyo21/image-hosting/raw/master/img/image-20210112151046946.png)
+在仓库根执行：
 
-### 按钮
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File psd2ui/scripts/Invoke-Psd2UiPortable.ps1 -Operation Prepare
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File psd2ui/scripts/Invoke-Psd2UiPortable.ps1 -Operation Connect
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File psd2ui/scripts/Invoke-Psd2UiPortable.ps1 -Operation Check
+```
 
-- 按钮的内容 需要加入一个组， 组的名字为 btnA@an 
-  - btnA 保证一个psd文件内不重复
-  - @an(按钮的拼音) 代表是按钮
-  - ![image-20210112151228639](https://gitee.com/Yoyo21/image-hosting/raw/master/img/image-20210112151228639.png)
-  - imgBtn1可以随便命名
-  - 如果是图片自带文字 ,Title 都可以不用有
-  - 如果是2张图片 则建议合并图层
-    - 如果不合 就在下面加一个图层即可
+首次准备与工作流检查分开：依赖和插件准备好后，日常只执行 Check，再读取 PSD。完整调用、创作目录配置与导出例子见 [PS-MCP](psd2ui/PS-MCP/README.md)。
 
-### 选中框
+从原 Skill 提取了 [psd2ui-export-workflow](.agents/skills/psd2ui-export-workflow/SKILL.md)，包含完整分析、人工确认、配置和导出，终点是 JSON/PNG。Skill 放在本仓库 `.agents/skills/`，保留其中相对引用；使用其他 AI 客户端时也可直接读取该文件及引用文档。没有分发原来包含私有 Adapter 的整套 Cursor 包。
 
-- 选中框的内容 需要加入一个组 ，组的名称为 xxxx@xzk
-  - xxxx 保证一个psd文件内不重复
-  - @xzk(选中框的拼音) 代表的是选中框
-  - ![image-20210112152044302](https://gitee.com/Yoyo21/image-hosting/raw/master/img/image-20210112152044302.png)
-  - 内部有一个xz 的组 ，这里面存选中状态的图片
-  - 默认状态就放在bxz下
+## 还缺什么
 
-### 列表
+| 事项 | 当前状态与接手方式 |
+| --- | --- |
+| Photoshop 配置、JSON/PNG 导出 | 已迁移现有实现；按上方启动流程使用，本次未实机验证 |
+| Unity Reader / Prefab Builder | 未包含，需项目自己实现或提供兼容导入器 |
+| UI 框架控件、列表/页面、字体效果 | 未包含，按 Schema 映射到项目组件 |
+| Assets/Prefab 路径、字体、Sprite Atlas | 项目自行配置，不带原私有路由 |
+| 数据绑定、点击事件、页面加载、业务代码生成 | 不属于 Photoshop 导出，需要项目接线 |
+| 签名安装附件与版本兼容验收 | 本次未制作或发布；按各分支说明打包并在目标环境验证 |
 
-- 列表的内容 需要加入一个组 。 组的名称为 xxxx@lb:H:1
+CEP 面板与 MCP 需要保持打开；不同 Photoshop 版本的文字、滤镜、效果和颜色结果仍可能不同。CEP 没有 UXP 原生 modal 排他锁，AI 操作期间应等待结束再手动编辑。
 
-  - xxxx 保证一个psd文件内不重复
+## 目录
 
-  - @lb(列表的拼音) 代表的是一个列表
+- `psd2ui/Plus-ins/`：Photoshop 插件和共享面板源码。
+- `psd2ui/Core/`、`Contracts/`：公共配置/导出逻辑与 Schema。
+- `psd2ui/PS-MCP/`、`scripts/`：可选自动化、宿主连接和本分支的分发命令。
+- `psd2ui/Tests/`：随原分支保留的测试源，本次没有运行。
+- `.agents/skills/psd2ui-export-workflow/`：公开的 Photoshop 导出流程。
+- `docs/UNITY-INTEGRATION.md`：Adapter 不分发的原因及接入清单。
 
-  - :H 与 :V  H 代表横着滑动 V 代表竖着滑动
-
-  - 1 代表一行 或者 一列放几个
-
-    ![image-20210112152335532](https://gitee.com/Yoyo21/image-hosting/raw/master/img/image-20210112152335532.png)
-
-  - 如上图 1 代表 一列放1个 一行放几个 无所谓 因为可以滑动
-
-- ![image-20210112152440954](https://gitee.com/Yoyo21/image-hosting/raw/master/img/image-20210112152440954.png)
-
-  - @Size 就是这个列表的大小，一般给透明度 为1(不影响PSD内部的显示 透明不透明都行 但是不能为0)
-
-- 如果是单行 或者 单列 需要放两个Item 来确定他们之间的间隔
-
-- 如果是多行多列的列表 则 起码放 三个， 左上 右边 下面 来确定 列表项的 间隔
-
-- **列表下的子项 名称为另外PSD的名称 ，图中的内容有错**
-
-
-
----
-
-## 开发记录
-
-### 2020.11.30
-
-- psd2UGUI 进度(10%) 
-
-  - 解析图片,子层级解析
-
-  - 加入循环递归
-
-- UI组件加入项目(50%)
-
-  - 扩展Menu,解决组件报错。
-  - 一键生成模块工具
-  - UIBinder 规则修改
-    - 全部替换成组件化
-
-### 2020.12.1
-
-- UI组件bug修复
-- 优化模块加载(70%)
-  - 去除UIControllerConfig , 加入ModuleManager
-  - 加入LuaLoad分帧加载
-
-### 2020.12.2
-
-- 完成LuaLoad 并测试 (100%)
-  - Main.lua 下的require 移动
-- psd2UGUI(20%)
-  - 命名的规定抽象方便修改
-  - 熟悉API
-
-### 2020.12.3 - 2020.12.4
-
-- psd2UGUI 开发
-  - 组件解析
-    - Button (完成)
-    - Sprite （完成）
-    - Text(TMP) (完成)
-    - Texture (完成)
-    - Slider
-    - Toggle
-    - TabGroup
-    - List
-
-- TODO：
-  - 资源自动加载项目
-    - 自动九宫？
-    - Texture 的格式
-  - Sprite的Common图集 未处理
-  - Button下挂子节点 有点问题
-
-
-
-### 2020.12.7 
-
-- 资源目录调整结构
-  - 打包图集工具调整
-  - 一键生成模块工具调整
-- CText解析完成
-
-### 2020.12.8
-
-- PSD解析工具加入项目
-- CList解析规则开发
-- 增加一键生成预设目录
-
-
-
-TODO ：
-
-- 更改CToggleGroup 为 CTabBarGroup
-- UIManager  BaseUI 修改
-  - 废弃UIViewConfig
-- 解析CTabBarGroup psd
-- UIBinder  规则优化
-- 预加载流程
-
-
-
-###  2020.12.14
-
-- 修改BaseUI BaseView BaseNode UIManager脚本
-- todo : UIManager 管理 baseView
-
-### 2020.12.15
-
-- 修改 UIBinder 脚本文件
-- BaseUI  完善
-- UIManager 管理 baseView 完成
-
-### 2020.12.16
-
-- 准备下周分享的内容
-  - 半自动化工具
-    - List的解析
-    - Button解析bug修复
-  - 充值模块开发
-
-### 2020.12.17
-
-- 调整之后的框架代码适应当前的项目
--  调整CBaseView层级关系
-- 加入SortOrder 关键参数
-
+原 Batch/Python、Export PSDUI.jsx、Demo 和旧 XML 工作流已替换，旧版本仍保留在 Git 历史中。

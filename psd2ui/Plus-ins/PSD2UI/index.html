@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>PSD2UI by YoyoRD</title><link rel="stylesheet" href="style.css"></head>
+<body>
+<div id="app-shell" class="app-shell">
+  <header class="brand-header">
+    <div class="brand-lockup" aria-label="psd2ui by yoyord"><strong>psd2ui</strong><span>by yoyord</span></div>
+    <button type="button" id="tab-settings" class="header-action" role="tab" aria-controls="panel-settings" aria-pressed="false">设置</button>
+  </header>
+  <div class="feature-tabs" role="tablist" aria-label="PSD2UI 功能区">
+    <button type="button" id="tab-prepare" class="feature-tab is-active" role="tab" aria-controls="panel-prepare" aria-pressed="true"><small>01</small><span>准备 PSD</span></button>
+    <button type="button" id="tab-layer" class="feature-tab" role="tab" aria-controls="panel-layer" aria-pressed="false"><small>02</small><span>配置组件</span></button>
+    <button type="button" id="tab-export" class="feature-tab" role="tab" aria-controls="panel-export" aria-pressed="false"><small>03</small><span>检查导出</span></button>
+  </div>
+  <div class="scroll-region">
+    <div class="document-strip"><strong id="current-document">没有打开本地 PSD</strong><span id="current-layer">没有选中图层</span></div>
+    <main id="panel-content">
+      <section id="panel-prepare" class="panel-section is-active" role="tabpanel" aria-labelledby="tab-prepare">
+        <div class="section-heading"><span class="eyebrow">从这里开始</span><h1>让这份设计，准备就绪。</h1><p>打开本地 PSD，准备文档，再为需要交互的部分配置组件。</p></div>
+        <div id="document-module-card" class="field-card">
+          <h2>界面所属模块</h2>
+          <label><span>模块名称</span><input id="document-module" placeholder="例如 baoleizhengduo"></label>
+          <p class="field-help">填写程序约定的业务模块，用于 Unity 的界面 / Prefab 归属。使用英文字母开头的小写字母、数字、下划线或短横线。</p>
+          <p id="document-module-status" class="field-help">打开 PSD 后读取所属模块。</p>
+          <div class="button-grid"><button type="button" id="set-module">保存所属模块</button><button type="button" id="normalize-module">规范名称格式</button></div>
+          <p class="field-help">图片按各自名称中的 comm、baoleizhengduo 等资源模块分目录，保存界面模块不会改名或合并这些图片目录。</p>
+        </div>
+        <div class="field-card preparation-card">
+          <div class="card-title-row"><h2>文档准备</h2><span id="preparation-badge" class="state-badge">等待 PSD</span></div>
+          <strong id="preparation-title">先在 Photoshop 中打开 PSD</strong>
+          <p id="preparation-description" class="field-help">新文档请先另存为本地 PSD 文件。</p>
+          <button type="button" id="prepare-document" class="button-primary button-large">初始化并保存配置</button>
+          <p class="field-help">首次保存组件也会自动完成初始化。再次准备会保留已保存的组件。</p>
+        </div>
+        <div class="field-card">
+          <div class="card-title-row"><h2>整理一个根组</h2><span class="subtle-tag">可选</span></div>
+          <p class="field-help">把全部顶层图层收进一个文件夹，方便整体移动和管理。</p>
+          <label><span>根组名称</span><input id="root-group-name" placeholder="例如 商店界面"></label>
+          <p id="root-group-summary" class="field-help">打开 PSD 后读取图层。</p>
+          <button type="button" id="wrap-document-root">将全部图层放入根组</button>
+          <p class="field-help">保留原图层名、层级顺序和位置；此操作会保存 PSD。</p>
+        </div>
+        <div class="next-step-card"><strong>接下来，只配置需要的组件</strong><p>普通图片和文字会自动识别。按钮、列表等组合内容再指定用途。</p><button type="button" id="start-components" class="text-action">去配置组件 →</button></div>
+      </section>
+      <section id="panel-layer" class="panel-section" role="tabpanel" aria-labelledby="tab-layer">
+        <div id="prepare-reminder" class="inline-notice"><span>这份 PSD 尚未保存插件配置。首次保存组件时会自动准备。</span><button type="button" id="go-prepare" class="text-action">查看准备步骤</button></div>
+        <div class="selected-layer-card layer-context-card">
+          <div class="card-title-row"><span class="eyebrow">正在编辑</span><button type="button" id="refresh-context" class="text-action">刷新选择</button></div>
+          <strong id="editing-layer">请先选择 Photoshop 图层</strong>
+          <p id="layer-config-status">选择图层或组件组开始配置。</p>
+          <p>当前类型：<strong id="effective-semantic">默认解析</strong></p>
+          <p id="layer-change-summary">配置随 PSD 保存，图层树自动同步。</p>
+          <button type="button" id="return-to-component" class="text-action is-hidden">返回正在配置的组件</button>
+        </div>
+        <div class="guide-card">
+          <button type="button" id="component-guide-toggle" class="guide-toggle" aria-expanded="false"><span>复杂组件怎么整理？</span><span id="component-guide-chevron">＋</span></button>
+          <div id="component-guide-content" class="is-hidden">
+            <p class="field-help">结构化就是告诉工具：哪一层负责背景、文字或重复条目。先配里面的小组件，再配外层大组件。</p>
+            <label><span>选择一个例子</span><select id="component-guide-kind"><option value="button">按钮 / Button</option><option value="input-field">输入框 / Input</option><option value="toggle">开关 / Toggle</option><option value="list">复杂列表 / List</option><option value="grid">网格 / Grid</option><option value="toggle-page-group">固定页签 / Tabs</option><option value="list-page-group">列表页签 / List Tabs</option><option value="states">多种外观 / States</option></select></label>
+            <pre id="component-guide-tree" class="guide-tree"></pre><div id="component-guide-steps"></div>
+            <p id="component-guide-note" class="field-help"></p>
+          </div>
+        </div>
+        <div class="field-card semantic-picker-card">
+          <h2><span class="section-number">1</span>这个部分是什么？</h2>
+          <select id="semantic">
+            <option id="semantic-option-unset" value="" disabled>未设置 / None</option>
+            <option id="semantic-option-image" value="image">图片 / Image</option>
+            <option id="semantic-option-raw-image" value="raw-image">独立贴图 / Raw Image</option>
+            <option id="semantic-option-text" value="text">文本 / Text</option>
+            <option id="semantic-option-button" value="button">按钮 / Button</option>
+            <option id="semantic-option-input-field" value="input-field">输入框 / Input Field</option>
+            <option id="semantic-option-toggle" value="toggle">开关 / Toggle</option>
+            <option id="semantic-option-list" value="list">列表 / List</option>
+            <option id="semantic-option-grid" value="grid">网格 / Grid</option>
+            <option id="semantic-option-red-point" value="red-point">红点 / Red Point</option>
+            <option id="semantic-option-toggle-page-group" value="toggle-page-group">页签页面组 / Toggle Page Group</option>
+            <option id="semantic-option-list-page-group" value="list-page-group">列表页面组 / List Page Group</option>
+            <option id="semantic-option-ignore" value="ignore">忽略子树 / Ignore Subtree</option>
+          </select>
+          <p id="selection-constraint" class="field-help">写入类型不会修改图层名称。</p>
+          <p class="field-help">未手动设置的图片：面积达到 512 × 512 px 或任一边超过 2040 px，自动使用独立贴图；其余使用 Sprite。已保存类型、九宫和必要的图片角色优先。</p>
+          <div class="semantic-explainer"><strong id="semantic-summary-title">图片</strong><p id="semantic-summary-text">视觉参数直接从 Photoshop 读取。</p></div>
+        </div>
+        <div id="component-editor" class="field-card structure-guide-card is-hidden">
+          <h2><span class="section-number">2</span>每一层负责什么？</h2>
+          <div class="structure-readout"><strong id="structure-root-summary">请选择现有组或同级连续图层</strong><p id="structure-candidates"></p></div>
+          <p class="field-help">使用已有组时不移动图层、不修改组名。多选时可组合为一个组件组；角色之外的装饰内容会保留。</p>
+          <div id="component-role-fields"></div>
+          <div id="component-preview-fields"></div>
+          <div id="component-layout-tools" class="is-hidden"><p id="component-layout-status" class="field-help"></p><button type="button" id="recalculate-component-layout" class="text-action">根据图层重新计算布局</button></div>
+          <div id="component-layout-fields"></div>
+          <div id="component-viewport-fields"></div>
+          <label id="component-group-name-field" class="is-hidden"><span>新组件组名称</span><input id="component-group-name" placeholder="例如 购买按钮"></label>
+          <p id="component-configuration-status" class="field-help"></p>
+          <div id="component-role-summary" class="role-summary"></div>
+        </div>
+        <div id="options-image" class="semantic-options">
+          <div class="field-card parameter-card">
+            <div class="card-title-row"><h2>图片参数</h2><button type="button" id="reset-image-defaults" class="text-action">恢复默认</button></div>
+            <label><span>图片类型</span><select id="image-type"><option value="simple">普通 / Simple</option><option value="sliced">九宫格 / Sliced</option><option value="tiled">平铺 / Tiled</option><option value="filled">填充 / Filled</option></select></label>
+            <div id="slice-fields" class="field-grid is-hidden"><label><span>左</span><input id="slice-left" type="number" min="0" step="1" value="0"></label><label><span>上</span><input id="slice-top" type="number" min="0" step="1" value="0"></label><label><span>右</span><input id="slice-right" type="number" min="0" step="1" value="0"></label><label><span>下</span><input id="slice-bottom" type="number" min="0" step="1" value="0"></label></div>
+            <p class="field-help">九宫导出会压缩可拉伸区域，并保留边框参数。</p>
+          </div>
+        </div>
+        <div id="options-text" class="semantic-options is-hidden"><div class="field-card"><div class="card-title-row"><h2>文本参数</h2><button type="button" id="reset-text-defaults" class="text-action">恢复默认</button></div><label><span>字体键</span><input id="font-key" value="default"></label><p class="field-help">内容、字号、颜色和排版直接从 Photoshop 读取。</p></div></div>
+        <div id="options-no-parameters" class="semantic-options is-hidden"><p class="field-help">视觉内容直接使用当前图层。组件配置随 PSD 保存。</p></div>
+        <div id="options-ignore" class="semantic-options is-hidden"><p class="warning-note">忽略当前图层及其全部子层。</p></div>
+        <div class="commit-card">
+          <strong id="commit-semantic">保存图片参数</strong><p class="field-help">保存到 PSD 后，切换图层仍会保留此配置。</p>
+          <div class="action-stack"><button type="button" id="apply-preset" class="button-primary">保存当前图层</button><button type="button" id="structure-component" class="button-primary is-hidden">保存组件配置</button><button type="button" id="combine-component" class="is-hidden">组合为组件</button></div>
+          <p id="component-save-feedback" class="field-help" aria-live="polite"></p>
+          <button type="button" id="locate-selection-issue" class="text-action is-hidden">定位问题图层</button>
+        </div>
+        <div id="visual-states-editor" class="field-card is-hidden">
+          <h2>视觉状态</h2>
+          <p class="field-help">用组表示不同外观，为每组填写状态名并指定默认状态。运行时状态切换由项目接入。</p>
+          <div id="visual-state-rows"></div>
+          <div class="button-grid"><button type="button" id="add-visual-state">添加状态</button><button type="button" id="save-visual-states">保存状态配置</button></div>
+          <label><span>预览状态</span><select id="visual-state-preview-choice"></select></label>
+          <div class="button-grid"><button type="button" id="preview-visual-state">预览此状态</button><button type="button" id="restore-visual-state">恢复原可见性</button></div>
+          <p id="visual-state-status" class="field-help">预览只临时切换可见性，保存组件或导出前会先恢复。</p>
+        </div>
+        <div id="image-rename-card" class="field-card rename-card is-hidden"><h2>图片命名</h2><p class="field-help">只在点击下方按钮后修改所选图层。图片使用正式资源名；组名和文字内容可保留原样。</p><div class="field-grid"><label><span>基础名</span><input id="batch-rename-base" placeholder="例如 comm_sp_0001"></label><label><span>起始序号</span><input id="batch-rename-start" type="number" min="0" step="1" value="1"></label></div><button type="button" id="batch-rename-selection">重命名所选图层</button></div>
+      </section>
+      <section id="panel-export" class="panel-section" role="tabpanel" aria-labelledby="tab-export">
+        <div class="section-heading"><span class="eyebrow">交付前的最后一步</span><h1>检查好，再交给程序。</h1><p>先选择输出位置，再检查命名和组件。</p></div>
+        <div id="preflight-report" class="field-card preflight-report is-hidden" aria-live="polite"><h2>需要处理的图层与问题</h2><p id="preflight-issue-summary" class="field-help"></p><div id="preflight-issues"></div><button type="button" id="recheck-preflight">修改后重新预检</button></div>
+        <div class="field-card"><h2>输出目录</h2><input id="uires-path" readonly placeholder="选择任意可写目录"><p class="field-help" id="uires-status">不要求与 PSD 位于同一仓库，目录名称不受限制。</p><div class="button-grid"><button type="button" id="select-uires">选择目录</button><button type="button" id="clear-uires">清除选择</button></div></div>
+        <div class="field-card"><h2>图片命名检查</h2><p class="field-help">只检查需要导出的图片。组名、文字内容保持原样；旧名称中的 @ 后缀不参与组件判断。</p><button type="button" id="check-image-names" class="button-primary">检查当前文档</button><strong id="image-name-summary">尚未检查</strong><div id="image-name-issues"></div></div>
+        <div class="field-card"><h2>导出</h2><p id="export-output-summary" class="field-help">请先在上方选择输出目录。</p><div class="action-stack"><button type="button" id="preflight">完整预检</button><button type="button" id="export-bundle" class="button-primary button-large">检查并导出</button></div><p id="export-summary">导出时自动同步当前 PSD，命名问题解决后才能写入资源。</p></div>
+      </section>
+      <section id="panel-settings" class="panel-section" role="tabpanel" aria-labelledby="tab-settings">
+        <div class="section-heading"><h1>文档与维护</h1><p>日常操作按上方三个步骤完成。</p></div>
+        <div class="readout-row"><span>画布尺寸</span><strong id="document-size">—</strong></div>
+        <div class="readout-row readout-row--stacked"><span>随 PSD 保存的配置镜像</span><strong id="sidecar-path">尚未保存配置</strong></div>
+        <div class="readout-row readout-row--stacked"><span>源变化</span><strong id="document-change-status">尚未读取</strong></div>
+        <button type="button" id="internal-settings-toggle" class="text-action" aria-expanded="false">内部维护选项</button>
+        <div id="internal-settings-panel" class="is-hidden">
+          <p class="field-help">以下入口用于兼容既有文档。已有配置时初始化只同步，不重置组件。</p>
+          <div class="button-grid"><button type="button" id="load-manifest">重新读取配置</button><button type="button" id="sync-layer-tree">同步图层树到配置</button></div>
+          <div class="field-card"><label><span>界面名称</span><input id="document-name"></label><div class="button-grid"><button type="button" id="read-document-name">读取 PSD 名称</button><button type="button" id="use-layer-name">使用选中名称</button><button type="button" id="clear-document-name">清空</button></div><label><span>内部 submodule</span><input id="document-submodule"></label><button type="button" id="normalize-submodule">规范 submodule</button><div class="action-stack"><button type="button" id="initialize-document">使用所选根初始化</button><button type="button" id="set-submodule">更新 submodule</button></div></div>
+          <div class="field-card"><strong id="resource-summary">尚未读取资源身份</strong><button type="button" id="inspect-resource">读取选中资源</button><button type="button" id="allocate-resource">分配资源</button><label><span>复用资源 ID</span><input id="reuse-resource-id"></label><button type="button" id="reuse-resource">绑定复用资源</button></div>
+          <label class="check-row"><input id="advanced-resource-toggle" type="checkbox"><span>显示资源迁移维护</span></label>
+          <div id="advanced-resource-panel" class="advanced-panel is-hidden"><button type="button" id="promote-common">提升为 Common</button><label><span>目标 module</span><input id="migration-module"></label><label><span>目标 submodule</span><input id="migration-submodule"></label><label><span>类型</span><select id="migration-kind"><option value="sprite">精灵 / Sprite</option><option value="texture">纹理 / Texture</option></select></label><div class="button-grid"><button type="button" id="migrate-resource">迁移资源</button><button type="button" id="retire-resource">停用资源</button></div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+<section class="status-card" aria-live="polite"><button type="button" id="status-toggle" class="status-header" aria-expanded="false"><span id="status-summary">等待操作。</span><span id="status-chevron">+</span></button><div id="status-content" class="status-content is-hidden"><textarea id="status" readonly></textarea><button type="button" id="clear-status" class="text-action">清空记录</button></div></section>
+<script src="uiShell.js"></script><script src="app.js"></script>
+</body></html>
