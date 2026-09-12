@@ -1,6 +1,6 @@
 ---
 name: psd2ui-export-workflow
-description: 使用 PSD2UGUI 中的 Photoshop 插件与可选 PS-MCP，分析 UI PSD、按确认方案配置图层并导出 JSON/PNG。适用于 CEP 或 CCX 分支；不包含 Unity Prefab 生成。
+description: 使用 PSD2UI 中的 Photoshop 插件与可选 PS-MCP，分析 UI PSD、按确认方案配置图层并导出 JSON/PNG。适用于 CEP 或 CCX 分支；不包含 Unity Prefab 生成。
 ---
 
 # PSD2UI 配置与导出

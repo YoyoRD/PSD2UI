@@ -1,8 +1,10 @@
 # 迁移来源与范围
 
+公开仓库现名为 [PSD2UI](https://github.com/YoyoRD/psd2ui)，原名 PSD2UGUI。下文保留迁移时的项目名称以说明历史来源。
+
 2026-09-12 将 PSD2UI 的两个现有分支分别迁入 PSD2UGUI，保留 PSD2UGUI 原 Git 历史。本次不修改插件、Core、Schema、MCP 或安装脚本的实现，不运行构建、测试、安装和 Photoshop/Unity 实机验证。
 
-| PSD2UGUI 分支 | PSD2UI 来源分支 | 来源提交 | 插件版本 |
+| 公开仓库分支 | 原工具仓库来源分支 | 来源提交 | 插件版本 |
 | --- | --- | --- | --- |
 | main | codex/cep9-migration（CEP9） | `ca9a5f06b6333a76d710c772dc23aeec5e10a7ef` | CEP 0.3.8 |
 | ccx | main | `9eb46d0fda26bf873d80731b9d1b282dd3802570` | UXP 0.2.0 |
