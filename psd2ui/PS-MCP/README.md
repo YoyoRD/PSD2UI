@@ -69,7 +69,7 @@ Portable 入口会隔离遗留的 PSD2UI 环境变量，因此调用该脚本时
 
 ## 工具与失败处理
 
-日常工具有 status、open_document、inspect_document、snapshot、wrap_document_root、initialize_document、execute_authoring、apply_confirmed_structure_plan、preflight_export、export_bundle，完整名称统一以 psd2ui_ 开头。准确参数以 [server.js](src/server.js) 为准，配置与结构操作见 [调用参考](../Workflows/references/photoshop-authoring.md)。
+日常工具有 photoshop_status、open_document、inspect_document、snapshot、wrap_document_root、initialize_document、execute_authoring、apply_confirmed_structure_plan、preflight_export、export_bundle，完整名称统一以 psd2ui_ 开头。准确参数以 [server.js](src/server.js) 为准，配置与结构操作见 [调用参考](../Workflows/references/photoshop-authoring.md)。
 
 CEP 操作串行执行，但不具备 UXP 原生 modal 排他锁，操作期间避免手动编辑 PSD。写请求超时/断连不表示取消，也不能自动重发；使用错误返回的 requestId 与 instanceId 调用 psd2ui_photoshop_status：
 
