@@ -67,7 +67,7 @@ Portable 入口会隔离遗留的 PSD2UI 环境变量，因此调用该脚本时
 
 ## 工具与失败处理
 
-日常工具有 status、open_document、inspect_document、snapshot、wrap_document_root、initialize_document、execute_authoring、apply_confirmed_structure_plan、preflight_export、export_bundle，完整名称统一以 psd2ui_ 开头。准确参数以 [server.js](src/server.js) 为准，配置与结构操作见 [调用参考](../Workflows/references/photoshop-authoring.md)。
+日常工具有 photoshop_status、open_document、inspect_document、snapshot、wrap_document_root、initialize_document、execute_authoring、apply_confirmed_structure_plan、preflight_export、export_bundle，完整名称统一以 psd2ui_ 开头。准确参数以 [server.js](src/server.js) 为准，配置与结构操作见 [调用参考](../Workflows/references/photoshop-authoring.md)。
 
 UDT 会话按当前插件路径和文件指纹识别。移动仓库或修改插件后可能需要重新显式 Connect，随后再 Check；会话缓存缺失不等于 Photoshop 没有安装。
 旧数据维护工具默认不注册，只有明确的维护任务才以 server.js --maintenance 或底层客户端的 Maintenance 参数启用；不属于共享 Skill 的日常步骤。
