@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "psd2ui-photoshop": {
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/psd2ui/PS-MCP/src/server.js"
+      ],
+      "env": {
+        "PSD2UI_AUTHORING_ROOTS": "<PSD创作目录绝对路径>",
+        "PSD2UI_UIRES_PATH": "<导出目录绝对路径>",
+        "PSD2UI_HOST": "cep"
+      }
+    }
+  }
+}
