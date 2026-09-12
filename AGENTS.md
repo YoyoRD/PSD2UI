@@ -1,4 +1,4 @@
-# PSD2UGUI 维护边界
+# PSD2UI 维护边界
 
 - `main` 是 CEP 版，`ccx` 是 UXP/CCX 版。来源与排除项见 `docs/MIGRATION.md`。
 - 本仓库交付 Photoshop 配置与 JSON/PNG 导出工具，不包含 Unity Adapters、框架组件、项目路由或业务代码。不要从其他项目补拷这些内容。

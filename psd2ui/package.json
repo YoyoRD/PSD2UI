@@ -2,7 +2,7 @@
   "name": "@yoyoengine/psd2ui",
   "version": "0.1.0",
   "private": true,
-  "description": "PSD2UGUI Photoshop 插件、公共 Core/Schema 与可选 PS-MCP；不分发 Unity Adapters。",
+  "description": "PSD2UI Photoshop 插件、公共 Core/Schema 与可选 PS-MCP；不分发 Unity Adapters。",
   "type": "commonjs",
   "scripts": {
     "test": "node --test Tests/Core/*.test.js Tests/UXP/*.test.js PS-MCP/tests/*.test.js",
