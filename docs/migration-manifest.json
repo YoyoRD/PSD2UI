@@ -1,0 +1,384 @@
+{
+  "formatVersion": 1,
+  "sourceProject": "psd2ui",
+  "sourceRef": "origin/main",
+  "sourceCommit": "9eb46d0fda26bf873d80731b9d1b282dd3802570",
+  "targetBranch": "ccx",
+  "verification": "file-copy-only",
+  "testsRun": false,
+  "runtimeVerified": false,
+  "excludedDirectories": [
+    "Adapters",
+    "Tests/Adapters"
+  ],
+  "files": [
+    {
+      "path": "psd2ui/Contracts/psd2ui.schema.json",
+      "sha256": "d2ed3ab5553d6c445e5197bde1da697407e8d82765161c510e881f5854826bf0"
+    },
+    {
+      "path": "psd2ui/Core/authoringCommands.js",
+      "sha256": "c6c03180138223b69c433052bddcfec8732b09f88e7187b7da44acee16ef572c"
+    },
+    {
+      "path": "psd2ui/Core/bundle.js",
+      "sha256": "1e0261536bac6143e6c1efc32a8406833c9303aecb0f004639e7c66071f633bb"
+    },
+    {
+      "path": "psd2ui/Core/defaults.js",
+      "sha256": "cfb961afcec1eea39f279679b1a5cd91e597e78fbc3d5ad4fcee71ce3ee11d21"
+    },
+    {
+      "path": "psd2ui/Core/errors.js",
+      "sha256": "efc8d75dbbf361e8c926528b06b17a6bc9b45db49ba105f229046af1d886646a"
+    },
+    {
+      "path": "psd2ui/Core/ids.js",
+      "sha256": "7b4e34fe81183433324a9bbdb43f67e8023a7a999cc0ac5bd13d7c4d1fb91663"
+    },
+    {
+      "path": "psd2ui/Core/index.js",
+      "sha256": "22cace4cd4c113c2ed734502e0e9f48cb7709b24091ba8f16ed83b9910877df6"
+    },
+    {
+      "path": "psd2ui/Core/naming.js",
+      "sha256": "b538e8f55d9068ca74acb20cc135ebbcfa7888c9f6f0130f28d74b7fe8437320"
+    },
+    {
+      "path": "psd2ui/Core/nineSlice.js",
+      "sha256": "d917624eb8ceab16bc68cd5438e7fa3054df3e6bb584e5f79d3f127b4f462407"
+    },
+    {
+      "path": "psd2ui/Core/resourceRegistry.js",
+      "sha256": "8ad21b3c6001bacdb0aa5a3f9fe9441c13c1b0b45efc1069e397f3d7d6c70c0a"
+    },
+    {
+      "path": "psd2ui/Core/selection.js",
+      "sha256": "4ee163bde40ce70ad12681759f30063bf2c5d0e7280884ae2adcd9dc5f4d4356"
+    },
+    {
+      "path": "psd2ui/Core/snapshot.js",
+      "sha256": "31c5fd687e0d1f8274d976f2cfb8a9b9184c8d5594baa51e16aa5536e95ab47c"
+    },
+    {
+      "path": "psd2ui/Core/structure.js",
+      "sha256": "3afffc667402d587f5ef2e0953a2b7aee7c50b0b5304d43833091c331429428e"
+    },
+    {
+      "path": "psd2ui/Core/validation.js",
+      "sha256": "968f14fabc2bc6cc9ae8efddf1fd90813c1879e671e82339b7711cbdef3ff557"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/app.js",
+      "sha256": "05ded46005baf884afa6465622592aea7cb602ad6039fb0a39147c9ca7d22e02"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/assets/branding/yoyord-logo-v2.png",
+      "sha256": "7a962344475beaa3115c0fa8a8bc167d870e992b803752f9435a6a5bb3de2e92"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/assets/branding/yoyord-logo-v2.prompt.txt",
+      "sha256": "8b0c9b04a0e2a57fe5b5d7d2a580a53d2b058f9d6a032b1f17eafb6ff4598dfa"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/assets/branding/yoyord-mark.png",
+      "sha256": "66b63fc6c62c7ec2d75c3d00b422b2caa3826af148da42860be2c828553f05a4"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/authoringCommands.js",
+      "sha256": "c6c03180138223b69c433052bddcfec8732b09f88e7187b7da44acee16ef572c"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/bundle.js",
+      "sha256": "1e0261536bac6143e6c1efc32a8406833c9303aecb0f004639e7c66071f633bb"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/defaults.js",
+      "sha256": "cfb961afcec1eea39f279679b1a5cd91e597e78fbc3d5ad4fcee71ce3ee11d21"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/errors.js",
+      "sha256": "efc8d75dbbf361e8c926528b06b17a6bc9b45db49ba105f229046af1d886646a"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/ids.js",
+      "sha256": "7b4e34fe81183433324a9bbdb43f67e8023a7a999cc0ac5bd13d7c4d1fb91663"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/index.js",
+      "sha256": "22cace4cd4c113c2ed734502e0e9f48cb7709b24091ba8f16ed83b9910877df6"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/naming.js",
+      "sha256": "b538e8f55d9068ca74acb20cc135ebbcfa7888c9f6f0130f28d74b7fe8437320"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/nineSlice.js",
+      "sha256": "d917624eb8ceab16bc68cd5438e7fa3054df3e6bb584e5f79d3f127b4f462407"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/resourceRegistry.js",
+      "sha256": "8ad21b3c6001bacdb0aa5a3f9fe9441c13c1b0b45efc1069e397f3d7d6c70c0a"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/selection.js",
+      "sha256": "4ee163bde40ce70ad12681759f30063bf2c5d0e7280884ae2adcd9dc5f4d4356"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/snapshot.js",
+      "sha256": "31c5fd687e0d1f8274d976f2cfb8a9b9184c8d5594baa51e16aa5536e95ab47c"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/structure.js",
+      "sha256": "3afffc667402d587f5ef2e0953a2b7aee7c50b0b5304d43833091c331429428e"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/validation.js",
+      "sha256": "968f14fabc2bc6cc9ae8efddf1fd90813c1879e671e82339b7711cbdef3ff557"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/icons/panel.png",
+      "sha256": "2d6074641713b87a4478689b09b5d87ada7101fe0639f5fb7858a9193303430b"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/icons/panel@2x.png",
+      "sha256": "fcb64470bae2fda7b1e2b573be7daab7cb255cee770bee454676ebef80de247c"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/icons/plugin.png",
+      "sha256": "431448e34e78b7b06d4e1b926d4d08d35874187e99573f079fcdef3b1fff52ed"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/icons/plugin@2x.png",
+      "sha256": "561c0f32f51a0f7a08ff1923a26cf6416897a8ffcce7046aadfe2330763d3345"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/icons/yoyord-panel.png",
+      "sha256": "daf58c618e1d347e609d71f8a24b1d3d6abd0b99f15a2ef60a0d177d52ca69e1"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/icons/yoyord-panel@2x.png",
+      "sha256": "4c50c400cd066753dedc4af7a30d7b5906a379c0aeb46b204a8bd4ac1a3cec7f"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/icons/yoyord-plugin.png",
+      "sha256": "d8ae640cba5d6fd3b6e873cc6c07878069b39bbb0fdc1687275d7e93349eb135"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/icons/yoyord-plugin@2x.png",
+      "sha256": "1e5db91ed44a60ec40c0ce6ff2f68cfaa0213a1cc5e955e8ba915355e9c1bd94"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/index.html",
+      "sha256": "df1880f8183b130fee572a737b9263eb145e83286f5d096f0d03566228fea526"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/manifest.json",
+      "sha256": "ee381b45a74ec18538709d00522f0a1b6dda88a1b44d0817f5e46befe967891f"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/src/exporter.js",
+      "sha256": "e6c494b451f63fd4be8a19c5d5ce7c44c71d2bc32ee94c2780512e93704e3d3a"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/src/photoshopDocument.js",
+      "sha256": "9acd2b0e7d47cc9c9c6e9062ee77804bc4fe9fe86e75cc403f7f54cc3f5213a1"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/src/preflightIssues.js",
+      "sha256": "9b60174265ad123c0be6b8e61ee4f7a6061010017040863ebfdcc112e519cbd3"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/src/textEffects.js",
+      "sha256": "dab33fb9e18e0d38931c48b467c974c187d5fbb0c509f9aa0b702d82964c25cc"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/src/uiResPath.js",
+      "sha256": "e354806672cc5fa25f0a444e5e54b1871fd6494faf8ca6367675a9eecda193b6"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/src/xmpStore.js",
+      "sha256": "bb635a7ee2a152eb7a712f0f896d65bcf3ebdf3e6f0c4f1358fcc621e464c353"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/style.css",
+      "sha256": "8a0ec780bb312ec5fcfd431944793690404914ae6640ade0a2ffd7c8db110d81"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/uiShell.js",
+      "sha256": "87d994c68540f18b15a5c86677015e7979ef4a95e9363df6ccbbd33cd75a655e"
+    },
+    {
+      "path": "psd2ui/PS-MCP/package-lock.json",
+      "sha256": "2d5cf4d23c8b4e539d2340f92454626f35b741ea89fc0b9841251ab2fe73ed28"
+    },
+    {
+      "path": "psd2ui/PS-MCP/scripts/call-tool.js",
+      "sha256": "91d7778e79aa288c3057cb092c7b7e6f307ec9179206f535cd2d19241b2e87c4"
+    },
+    {
+      "path": "psd2ui/PS-MCP/src/commandService.js",
+      "sha256": "38846790c7d8c97ed61db6adb39b9acb2a80bf73172c152f1b65a1769e392a76"
+    },
+    {
+      "path": "psd2ui/PS-MCP/src/hostBridge.js",
+      "sha256": "75c030ac9631087722b7bfb58897599275d272054e3a8e03f929ab675bcd655b"
+    },
+    {
+      "path": "psd2ui/PS-MCP/src/server.js",
+      "sha256": "38de29432e933f2453e84e098ff0bc15271a82b2babca218b2aa5bab563e457f"
+    },
+    {
+      "path": "psd2ui/PS-MCP/tests/cli-environment.test.js",
+      "sha256": "d767cd8fd269e566abc4199491e289d29d52b333a690049c3842df0ac6d44f23"
+    },
+    {
+      "path": "psd2ui/PS-MCP/tests/server-smoke.test.js",
+      "sha256": "5d830934f5d0fac17fcd4b178c78fb7cfc2f9933e0b6de7d49e94c3a2e71ad04"
+    },
+    {
+      "path": "psd2ui/scripts/Invoke-Psd2UiConfirmedPreinitializeRenames.ps1",
+      "sha256": "f909f74bbef5afbe2e1a8f4b745509b953eff59355827a69a8abedea849aad90"
+    },
+    {
+      "path": "psd2ui/scripts/Invoke-Psd2UiConfirmedStructurePlan.ps1",
+      "sha256": "1612c6b403ac326da6d2f8a38bad3a85d6d455337fd03066b0764c6c9fe78f48"
+    },
+    {
+      "path": "psd2ui/scripts/Invoke-Psd2UiConfirmedSubmoduleMigration.ps1",
+      "sha256": "ef9240b5dfe64ad87a2b066da96565c42400a2c9a674430e72823828887fec9b"
+    },
+    {
+      "path": "psd2ui/scripts/Invoke-Psd2UiMcpTool.ps1",
+      "sha256": "3a16e3b7cfee8bbb31bcfda4bb27480a4189f42c0e33248f9c568f5eccad71c0"
+    },
+    {
+      "path": "psd2ui/scripts/Invoke-Psd2UiPhotoshopDev.ps1",
+      "sha256": "6a98439bac63e46afd6173bcaf8783fa79d7c60f9f3627c7c386ca59f8eae1da"
+    },
+    {
+      "path": "psd2ui/scripts/Invoke-Psd2UiPhotoshopWorkflow.ps1",
+      "sha256": "83813fda715e3d9843079c653efaa2604827875bcdedb5204b342f40e2f0253d"
+    },
+    {
+      "path": "psd2ui/scripts/Invoke-Psd2UiPortable.ps1",
+      "sha256": "12ff30deac26a7ce6dbb0b8afdc22d56401c1350fb666509d1f0e5919e71a3d4"
+    },
+    {
+      "path": "psd2ui/scripts/sync-generated.mjs",
+      "sha256": "d9467014490c84f1fcbc206415abe0444b8cba8b6cef882c1b4aa1eec9e850a1"
+    },
+    {
+      "path": "psd2ui/scripts/udt-background-service.js",
+      "sha256": "3490af47ca5e661f85a68bf3d1f360057cb7d7fd40c6300020705663ef284f37"
+    },
+    {
+      "path": "psd2ui/scripts/udt-service-manager.js",
+      "sha256": "ddbe02eab1bc80b896a0671e771a488eed3a0f798a760bf661703d15906fa6a1"
+    },
+    {
+      "path": "psd2ui/scripts/uxp-devtools-runner.js",
+      "sha256": "c7fbcebb44b403013d32300d44e74df151b2729510f8cd17cd229fb7fe5d82cc"
+    },
+    {
+      "path": "psd2ui/Tests/Core/artist-structure.test.js",
+      "sha256": "9e9b87a2c95835bf44b3dc24923eba047949e2a08bbe2e13f1867a7655877940"
+    },
+    {
+      "path": "psd2ui/Tests/Core/authoring-v1.test.js",
+      "sha256": "f3f2ba1664ee71a09611b6a9966a76b8f75706d562142a4dffe768a50d589959"
+    },
+    {
+      "path": "psd2ui/Tests/Core/automatic-image-policy.test.js",
+      "sha256": "3dad14baa578288a93d90b247c1461813c3c43ddc675b483d1871a9531c5118f"
+    },
+    {
+      "path": "psd2ui/Tests/Core/bundle.test.js",
+      "sha256": "69db718dba95dd58e2b077c6799482996d4c34dbdffa164e4da7cb3b1f3ebe23"
+    },
+    {
+      "path": "psd2ui/Tests/Core/collection-layout-suggestion.test.js",
+      "sha256": "ecc8f5aec6b9097353c83c62aa00eba5cca1f8e2a40e803c5897a3b26ab639d2"
+    },
+    {
+      "path": "psd2ui/Tests/Core/collection-previews.test.js",
+      "sha256": "d5e467dfb178145327fa8a9d707284dca7fc409694496c8fed1a286b5b664a15"
+    },
+    {
+      "path": "psd2ui/Tests/Core/empty-groups.test.js",
+      "sha256": "fc020c52fc80cb4f42de1fa51e10603f60c90094cddfa46d96a9609499b36c31"
+    },
+    {
+      "path": "psd2ui/Tests/Core/fixtures/structured-layout.js",
+      "sha256": "fe15658559a8fc22ee4e6bec446d95724c6a3f883d2c7771818ed37744be442d"
+    },
+    {
+      "path": "psd2ui/Tests/Core/layout-bundle.test.js",
+      "sha256": "de57f3cb3c48448f4be1ed292dbcda5df00fbf299a695b6f3b163ced7155f038"
+    },
+    {
+      "path": "psd2ui/Tests/Core/mcp-command-service.test.js",
+      "sha256": "adca29165709146709c08a35472456de81be63aeeb8e7f521096baea30274984"
+    },
+    {
+      "path": "psd2ui/Tests/Core/mcp-host-bridge.test.js",
+      "sha256": "aba484f3df1a3324dc9ed7fd58fd4e6f116d17a227f330d274d1097486e91b0a"
+    },
+    {
+      "path": "psd2ui/Tests/Core/reconciliation.test.js",
+      "sha256": "4e2954d070182d62e96fc125cb46614b0d1e09493bd59ddd19a58fa8a7f47aa3"
+    },
+    {
+      "path": "psd2ui/Tests/Core/resource-registry.test.js",
+      "sha256": "ebfd2d1808af419c68297845e96e76d725148877c39b972a24aba9eff4340bd8"
+    },
+    {
+      "path": "psd2ui/Tests/Core/source-resource-naming.test.js",
+      "sha256": "54c8335b0e1f00e5b10bef98781375dcf60e943dcf10beb10f19d8efb3a1c686"
+    },
+    {
+      "path": "psd2ui/Tests/Core/text-layout-mode.test.js",
+      "sha256": "0b96712c5703bd3b548e69d1393eb8fd6618871f71026055d8a6e6ad9b927647"
+    },
+    {
+      "path": "psd2ui/Tests/Core/udt-runner-environment.test.js",
+      "sha256": "8b774dfe6a70383080c1b9d680cc0620bdec938134a3ae4250eec6084c3ace5c"
+    },
+    {
+      "path": "psd2ui/Tests/Core/udt-service-manager.test.js",
+      "sha256": "ad94e12012d2b62610bf0d02016acaa731d5c563192fa32123484e2ebb83e892"
+    },
+    {
+      "path": "psd2ui/Tests/Core/uxp-devtools-runner.test.js",
+      "sha256": "035ce51fb1ba2efa755e9e2f57daf7efce8d1ed5d33db6099f91f9f27b734f01"
+    },
+    {
+      "path": "psd2ui/Tests/UXP/component-panel.test.js",
+      "sha256": "0cf8b16ee057ee2a227b5f1f68208b33b65f629118aa560538b2dc80c9c3d47d"
+    },
+    {
+      "path": "psd2ui/Tests/UXP/export-transaction.test.js",
+      "sha256": "6c45217d2958465cb7ad2ca5b0a52c65b250d0fb2c6d3f0ebfda1469be70da29"
+    },
+    {
+      "path": "psd2ui/Tests/UXP/panel-compatibility.test.js",
+      "sha256": "a58139b95aa7ced36a792915249b55e1570a4cb0550e0cda326273b9f7897287"
+    },
+    {
+      "path": "psd2ui/Tests/UXP/preflight-issues.test.js",
+      "sha256": "ad744c560227cedfbe8de05fb0d84a3fe5be814d28898b8c53306f96d5735775"
+    },
+    {
+      "path": "psd2ui/Tests/UXP/text-effects-host.test.js",
+      "sha256": "99978246379e5f146a509ee307bb98d29a9a323184ab1c969d5bfb1361ae0259"
+    },
+    {
+      "path": "psd2ui/Tests/UXP/text-effects.test.js",
+      "sha256": "5dd1831d47d298e52317443a1d81051707979c201162aaa0724c4b065ea41e49"
+    },
+    {
+      "path": "psd2ui/Tests/UXP/xmp-store.test.js",
+      "sha256": "30450c5f8e643d43637e7a4c642ff63b75e28d762c8d55dc1236a728a1f5046a"
+    }
+  ]
+}

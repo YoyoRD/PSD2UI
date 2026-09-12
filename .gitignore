@@ -1,0 +1,7 @@
+.tmp/
+**/.tmp/
+**/node_modules/
+psd2ui/dist/
+*.p12
+*.pfx
+*.password.dpapi

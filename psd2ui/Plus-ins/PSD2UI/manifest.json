@@ -1,0 +1,47 @@
+{
+  "id": "com.yoyoengine.psd2ui",
+  "name": "PSD2UI by YoyoRD",
+  "version": "0.2.0",
+  "manifestVersion": 5,
+  "main": "index.html",
+  "host": {
+    "app": "PS",
+    "minVersion": "25.0.0",
+    "data": {
+      "apiVersion": 2
+    }
+  },
+  "icons": [
+    {
+      "width": 24,
+      "height": 24,
+      "path": "icons/yoyord-plugin.png",
+      "scale": [1, 2],
+      "theme": ["all"],
+      "species": ["pluginList"]
+    }
+  ],
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "yoyoengine-psd2ui-panel",
+      "label": { "default": "PSD2UI" },
+      "icons": [
+        {
+          "width": 23,
+          "height": 23,
+          "path": "icons/yoyord-panel.png",
+          "scale": [1, 2],
+          "theme": ["all"]
+        }
+      ],
+      "minimumSize": { "width": 280, "height": 420 },
+      "maximumSize": { "width": 640, "height": 2000 },
+      "preferredDockedSize": { "width": 340, "height": 760 },
+      "preferredFloatingSize": { "width": 380, "height": 820 }
+    }
+  ],
+  "requiredPermissions": {
+    "localFileSystem": "fullAccess"
+  }
+}

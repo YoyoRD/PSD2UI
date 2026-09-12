@@ -1,0 +1,490 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yoyoengine.dev/schemas/psd2ui/1.5.0/psd2ui.schema.json",
+  "title": "PSD2UI Engine-Agnostic UI Bundle",
+  "description": "引擎无关 UI 契约。1.5 保留美术图片基础名和 Unicode 节点名，记录共享图片来源及视觉状态；兼容旧版资源规则。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "generator", "document", "resources", "root"],
+  "properties": {
+    "schemaVersion": { "type": "string", "enum": ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"] },
+    "generator": { "type": "string", "minLength": 1 },
+    "document": { "$ref": "#/$defs/document" },
+    "resources": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/resource" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/diagnostic" }
+    },
+    "root": { "$ref": "#/$defs/node" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "schemaVersion": { "const": "1.2.0" } },
+        "required": ["schemaVersion"]
+      },
+      "then": {
+        "properties": {
+          "document": { "required": ["submodule"] },
+          "resources": { "items": { "required": ["submodule"] } }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "schemaVersion": { "enum": ["1.0.0", "1.1.0"] } },
+        "required": ["schemaVersion"]
+      },
+      "then": {
+        "properties": {
+          "document": { "not": { "required": ["submodule"] } },
+          "resources": { "items": { "not": { "required": ["submodule"] } } }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "schemaVersion": { "enum": ["1.3.0", "1.4.0"] } },
+        "required": ["schemaVersion"]
+      },
+      "then": {
+        "if": {
+          "properties": { "document": { "required": ["submodule"] } },
+          "required": ["document"]
+        },
+        "then": {
+          "properties": {
+            "resources": { "items": { "required": ["submodule"] } }
+          }
+        },
+        "else": {
+          "properties": {
+            "resources": { "items": { "not": { "required": ["submodule"] } } }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "schemaVersion": { "enum": ["1.4.0", "1.5.0"] } }, "required": ["schemaVersion"] },
+      "then": { "properties": { "root": { "$ref": "#/$defs/nodeV14" } } }
+    },
+    {
+      "if": { "properties": { "schemaVersion": { "const": "1.5.0" } }, "required": ["schemaVersion"] },
+      "then": {
+        "properties": {
+          "document": { "properties": { "submodule": false } },
+          "resources": { "items": {
+            "required": ["sourceLayerIds"],
+            "properties": {
+              "scope": { "const": "module" }, "submodule": false,
+              "fileName": { "pattern": "^[a-z][a-z0-9]*(?:_[A-Za-z0-9]+)+\\.png$" }
+            }
+          } }
+        }
+      },
+      "else": {
+        "properties": {
+          "resources": { "items": { "properties": {
+            "sourceLayerIds": false,
+            "fileName": { "pattern": "^[a-z][a-z0-9_-]*_(sp|tex)_[0-9]{4}\\.png$" }
+          } } },
+          "root": { "$ref": "#/$defs/nodeLegacy" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nodeLegacy": {
+      "properties": {
+        "visualStates": false,
+        "text": { "properties": { "layoutMode": false } },
+        "children": { "items": { "$ref": "#/$defs/nodeLegacy" } }
+      }
+    },
+    "visualStates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["defaultState", "states"],
+      "properties": {
+        "lineAdvance": { "type": "number", "exclusiveMinimum": 0 },
+        "photoshop": {
+          "type": "object", "additionalProperties": false, "required": ["version", "descriptorJson"],
+          "properties": { "version": { "const": 1 }, "descriptorJson": { "type": "string", "minLength": 2 } }
+        },
+        "defaultState": { "type": "string", "minLength": 1 },
+        "states": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["name", "nodeId"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "nodeId": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "toggle": {
+      "type": "string",
+      "enum": ["enabled", "disabled"]
+    },
+    "color": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["r", "g", "b", "a"],
+      "properties": {
+        "r": { "type": "number", "minimum": 0, "maximum": 1 },
+        "g": { "type": "number", "minimum": 0, "maximum": 1 },
+        "b": { "type": "number", "minimum": 0, "maximum": 1 },
+        "a": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "sliceBorder": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["left", "top", "right", "bottom"],
+      "properties": {
+        "left": { "type": "integer", "minimum": 0 },
+        "top": { "type": "integer", "minimum": 0 },
+        "right": { "type": "integer", "minimum": 0 },
+        "bottom": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "code", "nodeId", "message"],
+      "properties": {
+        "severity": { "const": "warning" },
+        "code": { "type": "string", "minLength": 1 },
+        "nodeId": { "type": "string" },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "structureRole": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "nodeId"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "nodeId": { "type": ["string", "null"] }
+      }
+    },
+    "structure": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["version", "status", "roles"],
+      "properties": {
+        "version": { "const": 1 },
+        "status": { "type": "string", "enum": ["complete", "incomplete"] },
+        "roles": { "type": "array", "items": { "$ref": "#/$defs/structureRole" } },
+        "layout": { "oneOf": [{ "$ref": "#/$defs/listLayout" }, { "$ref": "#/$defs/gridLayout" }] }
+      }
+    },
+    "listLayout": {
+      "type": "object", "additionalProperties": false,
+      "required": ["direction", "itemWidth", "itemHeight", "spacing"],
+      "properties": {
+        "direction": { "enum": ["horizontal", "vertical"] },
+        "itemWidth": { "type": "number", "exclusiveMinimum": 0 },
+        "itemHeight": { "type": "number", "exclusiveMinimum": 0 },
+        "spacing": { "type": "number", "minimum": 0 }
+      }
+    },
+    "gridLayout": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cellWidth", "cellHeight", "columns", "rows", "horizontalSpacing", "verticalSpacing"],
+      "properties": {
+        "cellWidth": { "type": "number", "exclusiveMinimum": 0 },
+        "cellHeight": { "type": "number", "exclusiveMinimum": 0 },
+        "columns": { "type": "integer", "minimum": 1 },
+        "rows": { "type": "integer", "minimum": 1 },
+        "horizontalSpacing": { "type": "number", "minimum": 0 },
+        "verticalSpacing": { "type": "number", "minimum": 0 }
+      }
+    },
+    "nodeV14": {
+      "allOf": [
+        { "$ref": "#/$defs/node" },
+        {
+          "if": { "properties": { "semantic": { "enum": ["list", "grid"] } }, "required": ["semantic"] },
+          "then": {
+            "required": ["structure"],
+            "properties": { "structure": { "type": "object", "required": ["layout"], "properties": { "status": { "const": "complete" } } } }
+          }
+        }
+      ],
+      "properties": { "children": { "items": { "$ref": "#/$defs/nodeV14" } } }
+    },
+    "gradientColorKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["time", "color"],
+      "properties": {
+        "time": { "type": "number", "minimum": 0, "maximum": 1 },
+        "color": { "$ref": "#/$defs/color" }
+      }
+    },
+    "gradientAlphaKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["time", "alpha"],
+      "properties": {
+        "time": { "type": "number", "minimum": 0, "maximum": 1 },
+        "alpha": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "textGradient": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["isVertical", "colorKeys", "alphaKeys"],
+      "properties": {
+        "isVertical": { "type": "boolean" },
+        "colorKeys": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/$defs/gradientColorKey" }
+        },
+        "alphaKeys": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "$ref": "#/$defs/gradientAlphaKey" }
+        }
+      }
+    },
+    "textMeshEffect": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["color", "distanceX", "distanceY"],
+      "properties": {
+        "color": { "$ref": "#/$defs/color" },
+        "distanceX": { "type": "number" },
+        "distanceY": { "type": "number" }
+      }
+    },
+    "textEffects": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["gradient", "outline", "shadow"],
+      "properties": {
+        "gradient": { "$ref": "#/$defs/textGradient" },
+        "outline": { "$ref": "#/$defs/textMeshEffect" },
+        "shadow": { "$ref": "#/$defs/textMeshEffect" }
+      }
+    },
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "module", "width", "height", "coordSpace"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "module": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$",
+          "not": { "const": "common" }
+        },
+        "submodule": { "type": "string", "pattern": "^[a-z][a-z0-9]*$" },
+        "width": { "type": "number", "exclusiveMinimum": 0 },
+        "height": { "type": "number", "exclusiveMinimum": 0 },
+        "coordSpace": { "const": "parent-top-left-px" }
+      }
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "scope", "module", "number", "fileName", "sourceLayerId"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "enum": ["sprite", "texture"] },
+        "scope": { "type": "string", "enum": ["module", "common"] },
+        "module": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$" },
+        "submodule": { "type": "string", "pattern": "^[a-z][a-z0-9]*$" },
+        "number": { "type": "integer", "minimum": 1, "maximum": 9999 },
+        "fileName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceLayerId": { "type": "string", "minLength": 1 },
+        "sourceLayerIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "sliceBorder": { "$ref": "#/$defs/sliceBorder" }
+      }
+    },
+    "rect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number", "minimum": 0 },
+        "height": { "type": "number", "minimum": 0 }
+      }
+    },
+    "image": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["resourceId", "imageType", "preserveAspect", "raycast", "color"],
+      "properties": {
+        "resourceId": { "type": "string", "minLength": 1 },
+        "imageType": { "type": "string", "enum": ["simple", "sliced", "tiled", "filled"] },
+        "sliceBorder": { "$ref": "#/$defs/sliceBorder" },
+        "preserveAspect": { "$ref": "#/$defs/toggle" },
+        "raycast": { "$ref": "#/$defs/toggle" },
+        "color": { "$ref": "#/$defs/color" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "imageType": { "const": "sliced" } } },
+          "then": { "required": ["sliceBorder"], "properties": { "sliceBorder": { "type": "object" } } }
+        }
+      ]
+    },
+    "rawImage": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["resourceId", "uvRect", "raycast", "color"],
+      "properties": {
+        "resourceId": { "type": "string", "minLength": 1 },
+        "uvRect": { "$ref": "#/$defs/rect" },
+        "raycast": { "$ref": "#/$defs/toggle" },
+        "color": { "$ref": "#/$defs/color" }
+      }
+    },
+    "text": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["value", "fontSize", "color", "alignment", "richText", "raycast", "lineSpacing"],
+      "properties": {
+        "fontKey": { "type": "string", "minLength": 1 },
+        "layoutMode": {
+          "type": "string", "enum": ["point", "paragraph"],
+          "description": "1.5 可选 Photoshop 文本类型。point 保留显式换行且不自动折行/截断；paragraph 保留段落换行。省略时采用旧版排版规则。"
+        },
+        "effects": { "$ref": "#/$defs/textEffects" },
+        "value": { "type": "string" },
+        "fontSize": { "type": "integer", "minimum": 1 },
+        "color": { "$ref": "#/$defs/color" },
+        "alignment": {
+          "type": "string",
+          "enum": [
+            "upper-left", "upper-center", "upper-right",
+            "middle-left", "middle-center", "middle-right",
+            "lower-left", "lower-center", "lower-right"
+          ]
+        },
+        "richText": { "$ref": "#/$defs/toggle" },
+        "raycast": { "$ref": "#/$defs/toggle" },
+        "lineSpacing": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "button": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["interactable", "transition"],
+      "properties": {
+        "interactable": { "$ref": "#/$defs/toggle" },
+        "transition": { "const": "color-tint" }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "sourceLayerId", "name", "semantic", "defaultsVersion", "rect", "visible", "opacity",
+        "rotationClockwiseDegrees", "image", "text", "button", "children"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "sourceLayerId": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "semantic": {
+          "type": "string",
+          "enum": [
+            "view", "group", "image", "raw-image", "text", "button", "input-field", "toggle",
+            "list", "grid", "red-point", "toggle-page-group", "list-page-group"
+          ]
+        },
+        "authoringSource": { "type": "string", "enum": ["default", "explicit", "structured"] },
+        "structure": { "$ref": "#/$defs/structure" },
+        "visualStates": { "$ref": "#/$defs/visualStates" },
+        "defaultsVersion": { "const": 1 },
+        "rect": { "$ref": "#/$defs/rect" },
+        "visible": { "$ref": "#/$defs/toggle" },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "rotationClockwiseDegrees": { "type": "number" },
+        "image": { "$ref": "#/$defs/image" },
+        "rawImage": { "$ref": "#/$defs/rawImage" },
+        "text": { "$ref": "#/$defs/text" },
+        "button": { "$ref": "#/$defs/button" },
+        "children": {
+          "description": "同级节点按 Photoshop 图层面板从前景到背景排列；目标 Adapter 负责转换为宿主绘制顺序。",
+          "type": "array",
+          "items": { "$ref": "#/$defs/node" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "semantic": { "const": "image" } } },
+          "then": { "properties": { "image": { "type": "object" } } }
+        },
+        {
+          "if": { "properties": { "semantic": { "const": "list" } } },
+          "then": { "properties": { "structure": { "properties": { "layout": { "$ref": "#/$defs/listLayout" } } } } }
+        },
+        {
+          "if": { "properties": { "semantic": { "const": "grid" } } },
+          "then": { "properties": { "structure": { "properties": { "layout": { "$ref": "#/$defs/gridLayout" } } } } }
+        },
+        {
+          "if": { "properties": { "semantic": { "not": { "enum": ["list", "grid"] } } } },
+          "then": { "properties": { "structure": { "properties": { "layout": false } } } }
+        },
+        {
+          "if": { "properties": { "semantic": { "const": "raw-image" } } },
+          "then": { "required": ["rawImage"], "properties": { "rawImage": { "type": "object" } } }
+        },
+        {
+          "if": { "properties": { "semantic": { "const": "text" } } },
+          "then": { "properties": { "text": { "type": "object" } } }
+        },
+        {
+          "if": { "properties": { "semantic": { "const": "button" } } },
+          "then": { "properties": { "button": { "type": "object" } } }
+        },
+        {
+          "if": {
+            "required": ["structure"],
+            "properties": { "structure": { "type": "object" } }
+          },
+          "then": {
+            "required": ["authoringSource"],
+            "properties": {
+              "authoringSource": { "const": "structured" },
+              "rect": {
+                "properties": {
+                  "width": { "exclusiveMinimum": 0 },
+                  "height": { "exclusiveMinimum": 0 }
+                }
+              },
+              "children": { "minItems": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["authoringSource"],
+            "properties": { "authoringSource": { "const": "structured" } }
+          },
+          "then": {
+            "required": ["structure"],
+            "properties": { "structure": { "type": "object" } }
+          }
+        }
+      ]
+    }
+  }
+}

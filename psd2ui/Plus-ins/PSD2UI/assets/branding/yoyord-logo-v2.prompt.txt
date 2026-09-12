@@ -1,0 +1,16 @@
+Generated with the built-in image_gen tool on 2026-09-09.
+Use: compact horizontal branding for the PSD2UI Photoshop panel.
+
+Design prompt: Create an original layered Y symbol with a cyan/blue accent and
+the exact wordmark "YoyoRD", clean geometric shapes and legible typography.
+No mascot, no GitHub/Octocat resemblance, no slogan, no watermark.
+
+Final edit prompt: Preserve the blue layered Y emblem and exact YoyoRD white
+wordmark, shape and proportions. Put the logo on a completely flat solid
+charcoal background, sRGB hex #252525 edge to edge. Remove every gray
+checkerboard square and all background texture, including the spaces inside
+the letters and between the icon layers. No transparency simulation,
+checkerboard, pattern, waves, grain or shadows. Tightly frame the horizontal
+logo with small margins.
+
+Delivered asset is an opaque dark-panel logo, not an alpha-transparent PNG.
