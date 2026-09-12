@@ -1,0 +1,10 @@
+# 将占位路径替换为本机真实绝对路径；只合并本节，不覆盖已有配置。
+[mcp_servers.psd2ui-photoshop]
+command = "node"
+args = ["<仓库绝对路径>/psd2ui/PS-MCP/src/server.js"]
+startup_timeout_sec = 30
+tool_timeout_sec = 660
+
+[mcp_servers.psd2ui-photoshop.env]
+PSD2UI_AUTHORING_ROOTS = "<PSD创作目录绝对路径>"
+PSD2UI_UIRES_PATH = "<导出目录绝对路径>"
