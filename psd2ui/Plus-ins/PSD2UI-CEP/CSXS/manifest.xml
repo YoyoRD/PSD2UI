@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="7.0" ExtensionBundleId="com.yoyoengine.psd2ui.cep" ExtensionBundleVersion="0.3.8" ExtensionBundleName="PSD2UI by YoyoRD">
-  <ExtensionList><Extension Id="com.yoyoengine.psd2ui.cep.panel" Version="0.3.8"/></ExtensionList>
+<ExtensionManifest Version="7.0" ExtensionBundleId="com.yoyoengine.psd2ui.cep" ExtensionBundleVersion="0.4.6" ExtensionBundleName="PSD2UI by YoyoRD">
+  <ExtensionList><Extension Id="com.yoyoengine.psd2ui.cep.panel" Version="0.4.6"/></ExtensionList>
   <ExecutionEnvironment>
     <HostList><Host Name="PHSP" Version="[20.0,99.9]"/><Host Name="PHXS" Version="[20.0,99.9]"/></HostList>
     <LocaleList><Locale Code="All"/></LocaleList>

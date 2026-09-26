@@ -89,6 +89,7 @@
         "properties": {
           "resources": { "items": { "properties": {
             "sourceLayerIds": false,
+            "exportSourceLayerId": false,
             "fileName": { "pattern": "^[a-z][a-z0-9_-]*_(sp|tex)_[0-9]{4}\\.png$" }
           } } },
           "root": { "$ref": "#/$defs/nodeLegacy" }
@@ -100,7 +101,7 @@
     "nodeLegacy": {
       "properties": {
         "visualStates": false,
-        "text": { "properties": { "layoutMode": false } },
+        "text": { "properties": { "layoutMode": false, "renderValue": false, "fontPostScriptName": false } },
         "children": { "items": { "$ref": "#/$defs/nodeLegacy" } }
       }
     },
@@ -296,6 +297,9 @@
     "resource": {
       "type": "object",
       "additionalProperties": false,
+      "allOf": [{ "if": { "required": ["exportSourceLayerId"] }, "then": {
+        "required": ["sliceBorder"], "properties": { "kind": { "const": "sprite" }, "sliceBorder": { "type": "object" } }
+      } }],
       "required": ["id", "kind", "scope", "module", "number", "fileName", "sourceLayerId"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
@@ -309,6 +313,7 @@
           "minLength": 1
         },
         "sourceLayerId": { "type": "string", "minLength": 1 },
+        "exportSourceLayerId": { "type": "string", "minLength": 1 },
         "sourceLayerIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
         "sliceBorder": { "$ref": "#/$defs/sliceBorder" }
       }
@@ -360,12 +365,20 @@
       "required": ["value", "fontSize", "color", "alignment", "richText", "raycast", "lineSpacing"],
       "properties": {
         "fontKey": { "type": "string", "minLength": 1 },
+        "fontPostScriptName": {
+          "type": "string", "minLength": 1, "pattern": "\\S",
+          "description": "1.5 可选 Photoshop 来源字体 PostScript 名。仅当可见文字范围使用统一字体且索引可靠时导出；字体资产映射由目标 Adapter 决定。"
+        },
         "layoutMode": {
           "type": "string", "enum": ["point", "paragraph"],
           "description": "1.5 可选 Photoshop 文本类型。point 保留显式换行且不自动折行/截断；paragraph 保留段落换行。省略时采用旧版排版规则。"
         },
         "effects": { "$ref": "#/$defs/textEffects" },
         "value": { "type": "string" },
+        "renderValue": {
+          "type": "string", "minLength": 1,
+          "description": "1.5 可选首次显示文本。仅当 Photoshop 同层逐字 RGB 填色不同且索引可靠时，由导出器生成完整覆盖 value 的 Unity UGUI color 标签；value 始终保留纯文本。"
+        },
         "fontSize": { "type": "integer", "minimum": 1 },
         "color": { "$ref": "#/$defs/color" },
         "alignment": {

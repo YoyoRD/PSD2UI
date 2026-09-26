@@ -120,7 +120,7 @@ function Assert-Psd2UiExtension([string]$Directory) {
         throw "Refusing to replace an unrelated extension: $Directory"
     }
     if (-not (Test-Path -LiteralPath (Join-Path $Directory 'META-INF/signatures.xml') -PathType Leaf)) {
-        throw 'The signed META-INF/signatures.xml file is missing. Obtain a complete release ZIP.'
+        throw 'The signed META-INF/signatures.xml file is missing. Obtain the complete installation directory.'
     }
 }
 

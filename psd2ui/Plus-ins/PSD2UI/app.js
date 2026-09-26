@@ -18,7 +18,7 @@ const {
   getActiveLayersInfo,
   getDocumentInfo,
   addSelectionChangeListener,
-  createSnapshot,
+  createSnapshot: readSnapshot,
   structureActiveLayers,
   validateGroupSelection,
   selectLayersById,
@@ -69,16 +69,64 @@ let componentSaveDocumentKey = '';
 let moduleInputDocumentKey = '';
 let moduleInputDirty = false;
 const authoringStateCache = new Map();
+const pendingDocumentIdentities = new Map();
+let operationSnapshots = null;
+
+// 同一次操作使用同一版本的快照，宿主变化后自动重新获取。
+function createSnapshot(rootLayerId, snapshots = operationSnapshots) {
+  const revision = typeof photoshopCore.getSnapshotRevision === 'function' ? photoshopCore.getSnapshotRevision() : null;
+  if (!snapshots) return readSnapshot(rootLayerId);
+  if (revision == null) { snapshots.clear(); return readSnapshot(rootLayerId); }
+  const key = `${documentKey()}|${rootLayerId}|${revision}`;
+  if (!snapshots.has(key)) snapshots.set(key, readSnapshot(rootLayerId));
+  return snapshots.get(key);
+}
 
 function documentKey() {
   const document = requireDocument();
   return `${String(document.id)}|${getDocumentInfo().path}`;
 }
 
+function bindCurrentDocumentIdentity(manifest, info = getDocumentInfo()) {
+  const source = manifest.document;
+  const key = `${Psd2Ui.normalizeDocumentPath(info.path)}|${source.id}|${source.sourcePath || ''}|${source.name}`;
+  const pendingId = pendingDocumentIdentities.get(key);
+  const bound = Psd2Ui.bindDocumentIdentity(manifest, info,
+    pendingId ? { idFactory: () => pendingId } : undefined);
+  if (bound.copied && !pendingId) {
+    pendingDocumentIdentities.set(key, bound.manifest.document.id);
+    if (pendingDocumentIdentities.size > 8) pendingDocumentIdentities.delete(pendingDocumentIdentities.keys().next().value);
+  }
+  return bound.manifest;
+}
+
 function selectionKey() {
   // Identity checks must not project every descendant of a selected group.
   try { return `${documentKey()}|${Array.from(requireDocument().activeLayers || []).map(layer => String(layer.id)).sort().join(',')}`; }
   catch (error) { return ''; }
+}
+
+// 名称和选区摘要只需原生图层，避免为页头复制整组内容。
+function selectedNativeLayers() {
+  const document = requireDocument();
+  const selected = Array.from(document.activeLayers || []);
+  if (!selected.length) throw new Error('请先选择一个或多个 Photoshop 图层。');
+  if (selected.length === 1) return selected;
+  const ids = new Set(selected.map(layer => String(layer.id)));
+  const ordered = [];
+  function visit(layers) {
+    Array.from(layers || []).forEach(layer => {
+      if (ids.has(String(layer.id))) ordered.push(layer);
+      visit(layer.layers);
+    });
+  }
+  visit(document.layers);
+  return ordered;
+}
+
+function isNativeGroupLayer(layer) {
+  const kind = String(layer && layer.kind || '').toLowerCase();
+  return !kind.includes('text') && (Psd2Ui.isGroupLayer(layer) || Boolean(layer && layer.layers && layer.layers.length));
 }
 
 function isCurrentRefresh(version, selection) {
@@ -101,7 +149,7 @@ function showElement(id, visible) {
   else target.classList.add('is-hidden');
 }
 
-async function ensureAuthoringManifest() {
+async function ensureAuthoringManifest(snapshotReader = createSnapshot) {
   const info = getDocumentInfo();
   const liveDocument = requireDocument();
   const key = `${String(liveDocument.id)}|${info.path}`;
@@ -109,13 +157,14 @@ async function ensureAuthoringManifest() {
   requireSameDocument(key);
   savedDocumentKey = stored ? key : '';
   const current = stored || (draftDocumentKey === key ? draftManifest : null);
-  if (current) return Psd2Ui.projectAutomaticImageSemantics(
-    { ...current, resourceNaming: 'source' }, createSnapshot(current.document.rootLayerId));
+  const bound = current && bindCurrentDocumentIdentity(current, info);
+  if (bound) return Psd2Ui.projectAutomaticImageSemantics(
+    { ...bound, resourceNaming: 'source' }, snapshotReader(bound.document.rootLayerId));
   const rootLayerId = 'document-root';
-  const snapshot = createSnapshot(rootLayerId);
+  const snapshot = snapshotReader(rootLayerId);
   draftManifest = Psd2Ui.executeAuthoringCommand(null, {
     command: 'initialize-document', input: {
-      module: 'document', resourceNaming: 'source', name: info.name,
+      module: 'document', resourceNaming: 'source', name: info.name, sourcePath: info.path,
       width: info.width, height: info.height,
       rootLayerId, rootLayerName: info.name, snapshot
     }
@@ -150,7 +199,7 @@ function renderPreparationState(manifest) {
   element('start-components').disabled = !info || !manifest;
   showElement('prepare-reminder', !ready);
   const layers = info ? Array.from(requireDocument().layers || []) : [];
-  const grouped = layers.length === 1 && Psd2Ui.isGroupLayer(readLayer(layers[0]));
+  const grouped = layers.length === 1 && isNativeGroupLayer(layers[0]);
   element('wrap-document-root').disabled = !manifest || !layers.length || grouped;
   element('wrap-document-root').textContent = grouped ? '已有一个根组' : '将全部图层放入根组';
   element('root-group-summary').textContent = grouped
@@ -269,16 +318,17 @@ function setStatusExpanded(expanded) {
 
 async function run(label, callback, options) {
   if (operationRunning) return null;
+  const started = Date.now();
   operationRunning = true;
   authoringRefreshVersion += 1;
-  authoringStateCache.clear();
+  operationSnapshots = new Map();
   try {
     if (globalThis.__PSD2UI_REFRESH_HOST__) await globalThis.__PSD2UI_REFRESH_HOST__();
     if (!options || options.keepVisualPreview !== true) await restoreVisualStatePreview();
     writeStatus(`${label}：执行中……`, `${label}：执行中`);
     const result = await callback();
     refreshContext();
-    await refreshAuthoringState();
+    await refreshAuthoringState({ reuseDocument: true });
     writeStatus({ operation: label, success: true, result }, `${label}成功`);
     return result;
   } catch (error) {
@@ -295,41 +345,79 @@ async function run(label, callback, options) {
     console.error(error);
     return null;
   } finally {
+    if (typeof photoshopCore.recordPerformance === 'function') photoshopCore.recordPerformance('panel:' + label, Date.now() - started);
+    operationSnapshots = null;
     operationRunning = false;
   }
 }
 
-function captureBaseline(manifest, context) {
+function captureBaseline(manifest, context, preparedSnapshot) {
   if (!manifest || !manifest.document || !manifest.document.rootLayerId) return manifest;
-  const snapshot = createSnapshot(manifest.document.rootLayerId);
+  const snapshot = preparedSnapshot || createSnapshot(manifest.document.rootLayerId);
   return Psd2Ui.executeAuthoringCommand(
     manifest,
     { command: 'capture-baseline', input: { snapshot } },
     context || HumanContext).manifest;
 }
 
-async function persistManifest(manifest, writer, context) {
+async function persistManifest(manifest, writer, context, preparedSnapshot) {
   const key = documentKey();
-  const snapshot = createSnapshot(manifest.document.rootLayerId);
+  manifest = bindCurrentDocumentIdentity(manifest);
+  const snapshot = preparedSnapshot || createSnapshot(manifest.document.rootLayerId);
   const synchronized = Psd2Ui.executeAuthoringCommand(manifest, {
     command: 'sync-layer-tree',
     input: { snapshot }
   }, context || HumanContext);
-  const persisted = captureBaseline(synchronized.manifest, context);
+  const persisted = captureBaseline(synchronized.manifest, context, snapshot);
   const writeResult = await (writer || writeManifest)(persisted, true);
   requireSameDocument(key);
-  const readback = await readManifest();
-  requireSameDocument(key);
-  assertJsonEqual(readback, persisted, '保存后的组件配置');
+  if (!writeResult || writeResult.verifiedManifest !== persisted) {
+    const readback = await readManifest();
+    requireSameDocument(key);
+    assertJsonEqual(readback, persisted, '保存后的组件配置');
+  }
   savedDocumentKey = key;
   draftManifest = persisted;
   draftDocumentKey = key;
+  const revision = typeof photoshopCore.getDocumentRevision === 'function' ? photoshopCore.getDocumentRevision() : null;
+  if (revision != null) authoringStateCache.set(key, { revision, manifest: persisted, savedDocumentKey: key,
+    sidecarLabel: `${writeResult.sidecarPath} · revision ${persisted.revision || 0}`,
+    changeLabel: '整个界面根与上次保存一致。' });
   return {
     manifest: persisted,
     writeResult,
     diagnostics: synchronized.value.diagnostics,
     reconciliation: synchronized.value.reconciliation
   };
+}
+
+function exportManifestSignature(manifest) {
+  const comparable = JSON.parse(JSON.stringify(manifest));
+  delete comparable.revision;
+  if (comparable.baseline) {
+    delete comparable.baseline.revision;
+    delete comparable.baseline.capturedAt;
+  }
+  return JSON.stringify(comparable);
+}
+
+async function persistExportManifest(prepared, context) {
+  const current = await readManifest();
+  const sidecar = current && await readSidecarManifest();
+  if (current && sidecar && sidecar.manifest
+      && JSON.stringify(current) === JSON.stringify(sidecar.manifest)
+      && requireDocument().saved === true) {
+    const bound = bindCurrentDocumentIdentity(prepared.manifest);
+    const synchronized = Psd2Ui.prepareManifestForExport(bound, prepared.snapshot, { allocateResources: false }).manifest;
+    const candidate = Psd2Ui.captureBaseline(synchronized, prepared.snapshot);
+    if (exportManifestSignature(current) === exportManifestSignature(candidate)) {
+      savedDocumentKey = documentKey();
+      draftManifest = current;
+      draftDocumentKey = savedDocumentKey;
+      return { manifest: current, writeResult: { sidecarPath: sidecar.path } };
+    }
+  }
+  return persistManifest(prepared.manifest, null, context, prepared.snapshot);
 }
 
 async function restoreManifestPersistence(document, backup) {
@@ -404,7 +492,7 @@ async function execute(command, input) {
 function handlePanelChanged(panelName) {
   element('current-layer').title = element('current-layer').textContent;
   refreshContext();
-  refreshAuthoringState().catch((error) => console.error('刷新 PSD2UI 配置状态失败。', error));
+  refreshAuthoringState({ reuseDocument: true }).catch((error) => console.error('刷新 PSD2UI 配置状态失败。', error));
 }
 
 function setAdvancedResourceVisible(visible) {
@@ -431,6 +519,7 @@ function setSemantic(semantic, resetValues) {
 function resetImageDefaults() {
   element('image-type').value = 'simple';
   showElement('slice-fields', false);
+  showElement('shared-slice-panel', false);
   element('slice-left').value = '0';
   element('slice-top').value = '0';
   element('slice-right').value = '0';
@@ -509,6 +598,19 @@ function semanticDisplayName(semantic) {
   if (semantic === 'view') return '界面根 / View';
   if (semantic === 'group') return '普通容器 / Group';
   return semantic || '尚未解析';
+}
+
+function hasDeferredGeometry() {
+  return typeof photoshopCore.hasDeferredSnapshot === 'function' && photoshopCore.hasDeferredSnapshot();
+}
+
+function displayedLayerChanges(manifest, layer, deferredGeometry) {
+  const deferred = deferredGeometry && Psd2Ui.normalizeLayerKind(layer) === 'group';
+  const changes = Psd2Ui.diffLayerFromBaseline(manifest, layer);
+  // 组的样式签名也包含 boundsNoEffects；待核对期间仅展示确定的字段变化。
+  return { deferred, changes: deferred
+    ? changes.filter(change => change !== '位置或尺寸已改变' && change !== '图层样式已改变')
+    : changes };
 }
 
 function clearChildren(target) {
@@ -923,7 +1025,8 @@ function updateSelectionControls(layers, manifest, preferredSemantic, blockedRea
       const bounds = group.bounds || {};
       const width = Math.max(0, Number(bounds.right || 0) - Number(bounds.left || 0));
       const height = Math.max(0, Number(bounds.bottom || 0) - Number(bounds.top || 0));
-      structureRootSummary.textContent = `${group.name} · ${Psd2Ui.summarizeSelection(group.children || [])} · ${width} × ${height} px`;
+      const size = hasDeferredGeometry() ? '尺寸待核对' : `${width} × ${height} px`;
+      structureRootSummary.textContent = `${group.name} · ${Psd2Ui.summarizeSelection(group.children || [])} · ${size}`;
     }
   }
   const savedComponent = authoredLayers.length === 1 && authoredLayers[0].structure ? authoredLayers[0] : null;
@@ -973,17 +1076,61 @@ async function applySelectedPreset() {
   };
 }
 
+function sharedSliceResource(manifest, layer) {
+  const registry = manifest && manifest.resourceRegistry;
+  if (!registry || !layer) return null;
+  const id = registry.layerBindings && registry.layerBindings[String(layer.id)];
+  return registry.resources && registry.resources[id] || null;
+}
+
+function renderSharedSlice(manifest, selected) {
+  const layer = selected.length === 1 ? selected[0] : null;
+  const node = layer && manifest.nodes[String(layer.id)];
+  const resource = sharedSliceResource(manifest, layer);
+  const sourceId = resource && resource.exportSourceLayerId;
+  const visible = manifest.resourceNaming === 'source' && node && node.image
+    && (node.image.imageType === 'sliced' || sourceId);
+  showElement('shared-slice-panel', Boolean(visible));
+  if (!visible) return;
+  const members = Object.keys(manifest.nodes).filter(id => {
+    const other = manifest.nodes[id];
+    return other.image && Psd2Ui.stripLegacyLayerSuffix(other.name) === Psd2Ui.stripLegacyLayerSuffix(node.name);
+  });
+  const source = sourceId && manifest.nodes[sourceId];
+  element('shared-slice-status').textContent = sourceId
+    ? `共用源图：${source ? source.name : '源图已缺失，请重新指定'}（图层 ${sourceId}）；同名图片 ${members.length} 处。`
+    : `尚未指定共用源图；同名图片 ${members.length} 处（图层 ${members.join('、')}）。`;
+  element('shared-slice-locate').disabled = !source;
+  element('shared-slice-clear').disabled = !sourceId;
+  // 保留本层边距输入，便于将它更换为源图；实际生效边距单独说明。
+  if (source && source.image && source.image.sliceBorder && String(layer.id) !== sourceId) {
+    const border = source.image.sliceBorder;
+    element('shared-slice-status').textContent += ` 实际导出边距（左/上/右/下）：${border.left}/${border.top}/${border.right}/${border.bottom}；下方输入保留本层配置，更换源图后生效。`;
+  }
+}
+
+async function setSharedSliceSource(clear) {
+  const key = documentKey();
+  const layer = requireSingleSelection('指定共用九宫源图');
+  const manifest = await ensureAuthoringManifest();
+  requireSameDocument(key);
+  requireLayersInAuthoringRoot(manifest, [layer]);
+  const result = Psd2Ui.executeAuthoringCommand(manifest, {
+    command: 'set-shared-nine-slice-source',
+    input: { layerId: layer.id, clear, snapshot: createSnapshot(manifest.document.rootLayerId) }
+  }, HumanContext);
+  const persisted = await persistManifest(result.manifest);
+  return { fileName: result.value.fileName, exportSourceLayerId: result.value.exportSourceLayerId || null,
+    sidecarPath: persisted.writeResult.sidecarPath };
+}
+
 async function structureSelectedComponent() {
   const key = selectionKey();
   const semantic = element('semantic').value;
   const options = readComponentOptions();
-  const persistedCurrent = await ensureAuthoringManifest();
+  const current = await ensureAuthoringManifest();
   if (selectionKey() !== key) throw new Error('读取配置期间选择已变化，请重新选择组件后保存。');
-  const synchronized = Psd2Ui.executeAuthoringCommand(persistedCurrent, {
-    command: 'sync-layer-tree',
-    input: { snapshot: createSnapshot(persistedCurrent.document.rootLayerId) }
-  }, HumanContext);
-  const current = synchronized.manifest;
+  const snapshot = createSnapshot(current.document.rootLayerId);
   const selected = withAuthoringState(getActiveLayersInfo(), current);
   requireLayersInAuthoringRoot(current, selected);
   componentSelection = selected;
@@ -1001,7 +1148,8 @@ async function structureSelectedComponent() {
     }
   }, HumanContext);
   const configured = applyViewportOptions(result.manifest, plan.rootLayerId, semantic, options, group.bounds);
-  const persisted = await persistManifest(configured);
+  // 预设会替换节点字段；在最终配置上同步一次，保留真实显隐、文字和资源绑定。
+  const persisted = await persistManifest(configured, null, null, snapshot);
   showComponentSaveReceipt(persisted.manifest, plan.rootLayerId, semantic);
   componentSelectionKey = '';
   return {
@@ -1115,8 +1263,8 @@ function refreshContext() {
     element('document-size').textContent = '—';
   }
   try {
-    const selected = getActiveLayersInfo();
-    result.layers = selected.map((layer) => ({ id: layer.id, name: layer.name }));
+    const selected = selectedNativeLayers();
+    result.layers = selected.map((layer) => ({ id: String(layer.id), name: layer.name }));
     const label = selected.length === 1
       ? `${selected[0].name} · #${selected[0].id}`
       : `已选择 ${selected.length} 个图层`;
@@ -1159,6 +1307,8 @@ async function refreshAuthoringState(options) {
   const key = selection ? documentKey() : '';
   const cached = options && options.reuseDocument && revision != null ? authoringStateCache.get(key) : null;
   const reuse = cached && cached.revision === revision;
+  const refreshSnapshots = operationSnapshots || new Map();
+  const snapshotForRefresh = rootLayerId => createSnapshot(rootLayerId, refreshSnapshots);
   let manifest;
   if (reuse) {
     manifest = cached.manifest;
@@ -1177,7 +1327,7 @@ async function refreshAuthoringState(options) {
     }
 
     try {
-      manifest = await ensureAuthoringManifest();
+      manifest = await ensureAuthoringManifest(snapshotForRefresh);
       if (!isCurrentRefresh(version, selection)) return null;
     } catch (error) {
       if (!isCurrentRefresh(version, selection)) return null;
@@ -1203,20 +1353,23 @@ async function refreshAuthoringState(options) {
     element('document-submodule').value = manifest.document.submodule || '';
   }
 
-  if (!reuse) try {
+  const deferredGeometry = hasDeferredGeometry();
+  if (deferredGeometry) {
+    element('document-change-status').textContent = '位置、尺寸和完整变化待核对；手动刷新、保存或导出时自动核对。';
+  } else if (!reuse || cached.comparisonDeferred) try {
     const documentChanges = Psd2Ui.diffSnapshotFromBaseline(
       manifest,
-      createSnapshot(manifest.document.rootLayerId));
+      snapshotForRefresh(manifest.document.rootLayerId));
     element('document-change-status').textContent = documentChanges.length === 0
       ? '整个界面根与上次保存一致。'
       : `${documentChanges.length} 个图层相对上次保存有变化：${documentChanges.slice(0, 3).map((entry) => entry.name).join('、')}${documentChanges.length > 3 ? '……' : ''}`;
   } catch (error) {
     element('document-change-status').textContent = `无法比较：${formatError(error)}`;
   }
-  if (!reuse && revision != null && revision === photoshopCore.getDocumentRevision()) {
+  if (revision != null && revision === photoshopCore.getDocumentRevision()) {
     authoringStateCache.set(key, { revision, manifest, savedDocumentKey,
       sidecarLabel: element('sidecar-path').textContent,
-      changeLabel: element('document-change-status').textContent });
+      changeLabel: element('document-change-status').textContent, comparisonDeferred: deferredGeometry });
     // Bound retained manifests when artists cycle through many large PSDs.
     if (authoringStateCache.size > 4) authoringStateCache.delete(authoringStateCache.keys().next().value);
   }
@@ -1233,6 +1386,7 @@ async function refreshAuthoringState(options) {
   }
 
   const nodes = manifest.nodes || {};
+  showElement('shared-slice-panel', false);
   if (selected.length === 1) {
     const layer = selected[0];
     const node = nodes[layer.id];
@@ -1261,14 +1415,17 @@ async function refreshAuthoringState(options) {
           + '。选择类型并保存可固定用途。';
       }
       loadNodeIntoFields(node);
+      renderSharedSlice(manifest, selected);
     } else {
       element('layer-config-status').textContent = `初始化后新增的图层；当前默认解析为 ${semanticDisplayName(effectiveSemantic)}，导出时会补入配置。`;
       setSemantic(effectiveSemantic, true);
     }
-    const changes = Psd2Ui.diffLayerFromBaseline(manifest, layer);
+    const comparison = displayedLayerChanges(manifest, layer, deferredGeometry);
+    const changes = comparison.changes;
     element('layer-change-summary').textContent = changes.length === 0
-      ? '与上次保存一致。'
+      ? (comparison.deferred ? '' : '与上次保存一致。')
       : `相对上次保存：${changes.join('；')}。`;
+    if (comparison.deferred) element('layer-change-summary').textContent += '位置、尺寸和样式待核对。';
   } else {
     const explicitCount = selected.filter((layer) => {
       const node = nodes[layer.id];
@@ -1277,13 +1434,13 @@ async function refreshAuthoringState(options) {
     element('effective-semantic').textContent = '多选组合';
     updateSelectionControls(selected, manifest, element('semantic').value);
     element('layer-config-status').textContent = `已选择 ${selected.length} 个图层，其中 ${explicitCount} 个已有配置。选择连续同级图层可组合为组件。`;
-    const changed = selected.map((layer) => ({
-      name: layer.name,
-      changes: Psd2Ui.diffLayerFromBaseline(manifest, layer)
-    })).filter((entry) => entry.changes.length > 0);
+    const comparisons = selected.map(layer => ({ name: layer.name, ...displayedLayerChanges(manifest, layer, deferredGeometry) }));
+    const changed = comparisons.filter(entry => entry.changes.length > 0);
+    const selectedGeometryDeferred = comparisons.some(entry => entry.deferred);
     element('layer-change-summary').textContent = changed.length === 0
-      ? '所选图层均与上次保存一致。'
+      ? (selectedGeometryDeferred ? '' : '所选图层均与上次保存一致。')
       : `${changed.length} 个所选图层有变化：${changed.slice(0, 3).map((entry) => `${entry.name}（${entry.changes.join('、')}）`).join('；')}${changed.length > 3 ? '；……' : ''}`;
+    if (selectedGeometryDeferred) element('layer-change-summary').textContent += '所选组的位置、尺寸和样式待核对。';
   }
   return manifest;
 }
@@ -1523,7 +1680,7 @@ async function inspectForAutomation(options) {
   requireSameDocument(key);
   let activeLayers = [];
   try {
-    activeLayers = getActiveLayersInfo().map((entry) => summarizeLayer(entry.layer));
+    activeLayers = selectedNativeLayers().map(summarizeLayer);
   } catch (error) {
     activeLayers = [];
   }
@@ -1560,7 +1717,8 @@ async function initializeForAutomation(options) {
     resourceNaming: 'source',
     module: input.module,
     submodule: input.submodule,
-    name: input.name || documentInfo.name,
+    name: documentInfo.name,
+    sourcePath: documentInfo.path,
     width: documentInfo.width,
     height: documentInfo.height,
     rootLayerId,
@@ -2042,13 +2200,14 @@ async function exportForAutomation(options) {
     throw new Error('PS-MCP 导出必须显式提供已授权的 UIRes 路径。');
   }
   const prepared = await prepareCurrentDocumentForExport();
-  const persisted = await persistManifest(prepared.manifest, null, McpContext);
+  const persisted = await persistExportManifest(prepared, McpContext);
   const result = await writeBundle(prepared.bundle, { uiResPath: input.uiResPath });
   return {
     ...result,
     diagnostics: combineDiagnostics(
       prepared.preparationDiagnostics,
-      prepared.bundle.diagnostics),
+      prepared.bundle.diagnostics,
+      result.warnings),
     reconciliation: prepared.reconciliation,
     sidecarPath: persisted.writeResult.sidecarPath
   };
@@ -2084,8 +2243,9 @@ function installDeveloperAutomation() {
     if (operationRunning) throw new Error('PSD2UI 正在执行其他操作，请等待完成。');
     operationRunning = true;
     authoringRefreshVersion += 1;
+    operationSnapshots = new Map();
     try { return await callback(); }
-    finally { operationRunning = false; }
+    finally { operationSnapshots = null; operationRunning = false; }
   };
 }
 
@@ -2107,7 +2267,10 @@ element('reset-text-defaults').addEventListener('click', () => {
   writeStatus('fontKey 已恢复为 default；尚未写入 PSD。', '已恢复文本默认值');
 });
 
-element('refresh-context').addEventListener('click', () => run('刷新当前状态', refreshAuthoringState));
+element('refresh-context').addEventListener('click', () => run('刷新当前状态', async () => {
+  if (typeof photoshopCore.invalidateMetadata === 'function') photoshopCore.invalidateMetadata();
+  await refreshAuthoringState();
+}));
 element('prepare-document').addEventListener('click', () => run('准备 PSD', prepareDocument));
 element('wrap-document-root').addEventListener('click', () => run('建立根组', wrapDocumentRoot));
 element('start-components').addEventListener('click', () => PanelShell.activatePanel('layer'));
@@ -2135,20 +2298,6 @@ element('return-to-component').addEventListener('click', async () => {
   writeStatus('已恢复刚才的角色选择；请点击保存组件配置。', '已返回组件，角色选择待保存');
 });
 element('sync-layer-tree').addEventListener('click', () => run('同步图层树到配置', syncLayerTreeToManifest));
-element('read-document-name').addEventListener('click', () => run('读取界面名称', async () => {
-  const info = getDocumentInfo();
-  element('document-name').value = info.name;
-  return { name: info.name, source: 'PSD 文件名' };
-}));
-element('use-layer-name').addEventListener('click', () => run('读取选中图层名', async () => {
-  const layer = requireSingleSelection('读取选中图层名');
-  element('document-name').value = layer.name;
-  return { name: layer.name, source: '选中图层' };
-}));
-element('clear-document-name').addEventListener('click', () => {
-  element('document-name').value = '';
-  writeStatus('界面名称已清空；尚未写入 PSD。', '已清空界面名称');
-});
 element('select-uires').addEventListener('click', () => run('选择输出目录', async () => {
   const folder = await chooseUiResFolder();
   renderUiResFolder(folder);
@@ -2173,7 +2322,8 @@ element('initialize-document').addEventListener('click', () => run('初始化文
     resourceNaming: 'source',
     module: element('document-module').value || 'document',
     submodule: element('document-submodule').value,
-    name: element('document-name').value || documentInfo.name,
+    name: documentInfo.name,
+    sourcePath: documentInfo.path,
     width: documentInfo.width,
     height: documentInfo.height,
     rootLayerId: root.id,
@@ -2219,6 +2369,17 @@ element('component-group-name').addEventListener('change', validateComponentDraf
 element('recalculate-component-layout').addEventListener('click', recalculateComponentLayout);
 element('locate-selection-issue').addEventListener('click', () => run('定位组合问题', () => selectLayersById(selectionIssueLayerIds)));
 element('image-type').addEventListener('change', updateSemanticOptions);
+element('shared-slice-set').addEventListener('click', () => run('指定共用九宫源图', () => setSharedSliceSource(false)));
+element('shared-slice-clear').addEventListener('click', () => run('取消共用九宫源图', () => setSharedSliceSource(true)));
+element('shared-slice-locate').addEventListener('click', () => run('定位共用九宫源图', async () => {
+  const key = documentKey();
+  const layer = requireSingleSelection('定位共用九宫源图');
+  const manifest = await ensureAuthoringManifest();
+  requireSameDocument(key);
+  const resource = sharedSliceResource(manifest, layer);
+  if (!resource || !resource.exportSourceLayerId) throw new Error('当前图片尚未指定共用源图。');
+  return selectLayersById([resource.exportSourceLayerId]);
+}));
 element('add-visual-state').addEventListener('click', () => {
   addVisualStateRow(null, visualStateInputs.length === 0);
   validateVisualStateDraft();
@@ -2313,21 +2474,31 @@ function resourceKindSummary(bundle) {
   return `${sprites} 个 Sprite、${textures} 个 Texture`;
 }
 
+function resourceReuseSummary(result) {
+  const sources = result && result.sourceReuse || [];
+  if (!sources.length) return '';
+  const detail = sources.slice(0, 3).map(source => `${source.fileName} → ${source.existingFile ? '已有图片' : `图层 ${source.sourceLayerId}`}`).join('；');
+  return `同名图片统一复用 ${sources.length} 项（${detail}${sources.length > 3 ? '；其余见详情' : ''}）。`;
+}
+
 async function preflightCurrentDocument() {
   const prepared = await prepareCurrentDocumentForExport();
   const contentCheck = currentUiResFolder ? await verifyBundle(prepared.bundle, { uiResFolder: currentUiResFolder }) : null;
   const diagnostics = combineDiagnostics(
     prepared.preparationDiagnostics,
-    prepared.bundle.diagnostics);
+    prepared.bundle.diagnostics,
+    contentCheck && contentCheck.warnings);
   const result = {
     issues: [],
     diagnostics,
     reconciliation: prepared.reconciliation,
+    sourceReuse: contentCheck && contentCheck.sourceReuse || [],
     outputPath: currentUiResFolder && currentUiResFolder.nativePath || '',
     resources: prepared.bundle.resources.map((resource) => resource.fileName)
   };
   element('export-summary').textContent = `预检通过；${resourceKindSummary(prepared.bundle)}，${diagnostics.length} 条非阻断诊断。`
-    + (contentCheck ? `已核对图片内容，${contentCheck.reusedResourceCount} 个公共资源可复用。` : '选择输出目录后可检查同名公共资源。');
+    + (contentCheck ? `${contentCheck.reusedResourceCount} 个图片资源可复用。${resourceReuseSummary(contentCheck)}` : '选择输出目录后可检查同名公共资源。')
+    + (contentCheck && contentCheck.warnings.length ? `提示：${contentCheck.warnings[0].message}` : '');
   return result;
 }
 
@@ -2338,14 +2509,15 @@ element('export-bundle').addEventListener('click', () => run('导出 JSON 与图
   preflightContext = { documentKey: documentKey(), manifest: null, snapshot: null };
   const uiResFolder = requireUiResFolder();
   const prepared = await prepareCurrentDocumentForExport();
-  const persisted = await persistManifest(prepared.manifest);
+  const persisted = await persistExportManifest(prepared, HumanContext);
   const result = await writeBundle(prepared.bundle, { uiResFolder });
-  element('export-summary').textContent = `已导出 ${resourceKindSummary(prepared.bundle)}，复用 ${result.reusedResourceCount || 0} 个相同公共资源；${result.json}`;
+  element('export-summary').textContent = `已导出 ${resourceKindSummary(prepared.bundle)}，复用 ${result.reusedResourceCount || 0} 个图片资源；${resourceReuseSummary(result)}${result.warnings.length ? `提示：${result.warnings[0].message}；` : ''}${result.json}`;
   return {
     ...result,
     diagnostics: combineDiagnostics(
       prepared.preparationDiagnostics,
-      prepared.bundle.diagnostics),
+      prepared.bundle.diagnostics,
+      result.warnings),
     reconciliation: prepared.reconciliation,
     sidecarPath: persisted.writeResult.sidecarPath
   };

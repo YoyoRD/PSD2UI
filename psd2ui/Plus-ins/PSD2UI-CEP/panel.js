@@ -46,10 +46,33 @@
     }
   });
 
+  // Plus-ins/PSD2UI-CEP/src/performance.js
+  var require_performance = __commonJS({
+    "Plus-ins/PSD2UI-CEP/src/performance.js"(exports, module) {
+      "use strict";
+      var totals = /* @__PURE__ */ Object.create(null);
+      var recent = [];
+      var sequence = 0;
+      function record(stage, milliseconds, size) {
+        const total = totals[stage] || (totals[stage] = { count: 0, milliseconds: 0, maxMilliseconds: 0 });
+        total.count++;
+        total.milliseconds += milliseconds;
+        total.maxMilliseconds = Math.max(total.maxMilliseconds, milliseconds);
+        recent.push({ sequence: ++sequence, stage, milliseconds, size: size || 0 });
+        if (recent.length > 120) recent.shift();
+      }
+      function snapshot() {
+        return JSON.parse(JSON.stringify({ sequence, totals, recent }));
+      }
+      module.exports = { record, snapshot };
+    }
+  });
+
   // Plus-ins/PSD2UI-CEP/src/hostRpc.js
   var require_hostRpc = __commonJS({
     "Plus-ins/PSD2UI-CEP/src/hostRpc.js"(exports, module) {
       "use strict";
+      var performance = require_performance();
       function errorWithCode(message, code) {
         const error = new Error(message);
         error.code = code;
@@ -78,20 +101,39 @@
         }
         return response;
       }
-      function prepareRequest(json) {
-        if (json.length < 32768) return { script: inlineScript(json), dispose() {
-        } };
+      function stageFile(content, suffix) {
         const fs = __require("fs"), path = __require("path"), os = __require("os"), crypto = __require("crypto");
+        if (Buffer.byteLength(content, "utf8") > 64 * 1024 * 1024) {
+          throw errorWithCode("Photoshop RPC 输入文件超过 64 MiB。", "PSD2UI_INVALID_REQUEST_FILE");
+        }
         const directory = path.join(os.tmpdir(), "PSD2UI-CEP-rpc");
         try {
           fs.mkdirSync(directory);
         } catch (error) {
           if (error.code !== "EEXIST") throw error;
         }
-        const file = path.join(directory, crypto.randomBytes(16).toString("hex") + ".json");
-        fs.writeFileSync(file, json, { encoding: "utf8", flag: "wx" });
+        const file = path.join(directory, crypto.randomBytes(16).toString("hex") + suffix);
+        let descriptor;
+        try {
+          descriptor = fs.openSync(file, "wx", 384);
+          fs.writeFileSync(descriptor, content, { encoding: "utf8" });
+          fs.closeSync(descriptor);
+          descriptor = void 0;
+        } catch (error) {
+          if (descriptor != null) {
+            try {
+              fs.closeSync(descriptor);
+            } catch (_) {
+            }
+            try {
+              fs.unlinkSync(file);
+            } catch (_) {
+            }
+          }
+          throw error;
+        }
         return {
-          script: "$.PSD2UIHost.dispatchFile(" + JSON.stringify(file.replace(/\\/g, "/")).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029") + ")",
+          path: file.replace(/\\/g, "/"),
           dispose() {
             try {
               fs.unlinkSync(file);
@@ -100,6 +142,31 @@
             }
           }
         };
+      }
+      function prepareRequest(json, serializedManifest) {
+        const files = [];
+        const dispose = () => files.forEach((file) => file.dispose());
+        try {
+          if (serializedManifest != null) {
+            const manifestFile = stageFile(serializedManifest, ".manifest.json");
+            files.push(manifestFile);
+            const envelope = JSON.parse(json);
+            envelope.params.serializedManifestFile = manifestFile.path;
+            envelope.params.serializedManifestLength = serializedManifest.length;
+            json = JSON.stringify(envelope);
+          }
+          if (json.length < 32768) return { script: inlineScript(json), size: json.length, dispose };
+          const envelopeFile = stageFile(json, ".json");
+          files.push(envelopeFile);
+          return {
+            script: "$.PSD2UIHost.dispatchFile(" + JSON.stringify(envelopeFile.path).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029") + ")",
+            size: json.length,
+            dispose
+          };
+        } catch (error) {
+          dispose();
+          throw error;
+        }
       }
       function createHostRpc(options) {
         const configuration = options || {};
@@ -147,18 +214,23 @@
         }
         return {
           invoke(method, params) {
-            let json;
+            let json, serializedManifest = null;
             try {
-              json = requestJson(method, params);
+              if (method === "writeManifest" && params && params.validated === true && typeof params.serializedManifest === "string" && params.serializedManifest.length >= 32768) {
+                serializedManifest = params.serializedManifest;
+                json = requestJson(method, Object.assign({}, params, { serializedManifest: void 0 }));
+              } else json = requestJson(method, params);
             } catch (error) {
               return Promise.reject(error);
             }
             const result = tail.then(async () => {
               if (uncertain) throw uncertain;
-              const request = prepareRequest(json);
+              const request = prepareRequest(json, serializedManifest);
+              const started = Date.now();
               try {
                 return await evaluate(request.script);
               } finally {
+                performance.record("host:" + method, Date.now() - started, request.size);
                 if (!uncertain) request.dispose();
               }
             });
@@ -2575,6 +2647,28 @@
           return require_photoshop().invoke(method, params);
         };
         const knownProfiles = /* @__PURE__ */ new Map();
+        async function readPngSize(file) {
+          const bytes = BufferType.from(await file.read({ format: storage.formats.binary }));
+          return new Promise((resolve, reject) => {
+            new PNG().parse(bytes, (error, png) => {
+              if (error) reject(error);
+              else resolve({ width: png.width, height: png.height });
+            });
+          });
+        }
+        async function samePngContent(first, second) {
+          const firstBytes = BufferType.from(await first.read({ format: storage.formats.binary }));
+          const secondBytes = BufferType.from(await second.read({ format: storage.formats.binary }));
+          const firstImage = PNG.sync.read(firstBytes);
+          const secondImage = PNG.sync.read(secondBytes);
+          if (firstImage.width !== secondImage.width || firstImage.height !== secondImage.height) return false;
+          if (firstImage.data.length !== secondImage.data.length) return false;
+          for (let index = 0; index < firstImage.data.length; index += 4) {
+            if (firstImage.data[index + 3] !== secondImage.data[index + 3]) return false;
+            if (firstImage.data[index + 3] && (firstImage.data[index] !== secondImage.data[index] || firstImage.data[index + 1] !== secondImage.data[index + 1] || firstImage.data[index + 2] !== secondImage.data[index + 2])) return false;
+          }
+          return true;
+        }
         async function temporaryFile() {
           const folder = await storage.localFileSystem.getTemporaryFolder();
           temporaryCounter += 1;
@@ -2665,7 +2759,7 @@
             await file.delete();
           }
         }
-        return { getPixels, createImageDataFromBuffer, putPixels };
+        return { getPixels, createImageDataFromBuffer, putPixels, readPngSize, samePngContent };
       }
       module.exports = createImaging();
       module.exports.createImaging = createImaging;
@@ -2695,26 +2789,39 @@
         const layerCache = /* @__PURE__ */ new Map();
         const documents = [];
         const listeners = [];
+        const idleListeners = /* @__PURE__ */ new Set();
         let activeDocumentId = null;
         let pendingWrites = [];
         let operationTail = Promise.resolve();
         let modalTail = Promise.resolve();
         let operations = 0;
         let modalRunning = false;
+        let modalPending = 0;
         let stateSignature = "";
         let snapshotStamp = "";
         let snapshotProbe = null;
         let contentRevision = 0;
+        const geometryDirty = /* @__PURE__ */ new Map();
         const yieldHost = configuration.yieldHost || (() => new Promise((resolve) => setTimeout(resolve, 20)));
         function schedule(operation) {
           operations += 1;
           const result = operationTail.then(operation);
-          operationTail = result.then(() => {
+          const finished = () => {
             operations -= 1;
-          }, () => {
-            operations -= 1;
-          });
+            notifyIdle();
+          };
+          operationTail = result.then(finished, finished);
           return result;
+        }
+        function notifyIdle() {
+          if (modalRunning || modalPending || operations || pendingWrites.length) return;
+          idleListeners.forEach((listener) => {
+            try {
+              listener();
+            } catch (error) {
+              if (typeof console !== "undefined") console.error(error);
+            }
+          });
         }
         function requireDocument(id) {
           const result = documentCache.get(String(id));
@@ -2726,8 +2833,8 @@
           if (!result || !result._present) throw new Error("Photoshop 图层已删除或不存在：" + layerId);
           return result;
         }
-        function queueWrite(method, params, apply) {
-          pendingWrites.push({ method, params, apply });
+        function queueWrite(method, params, apply, committed) {
+          pendingWrites.push({ method, params, apply, committed });
           apply();
         }
         function defineDataProperties(target, names) {
@@ -2743,6 +2850,8 @@
           Object.defineProperties(layer, {
             _data: { value: {}, writable: true },
             _present: { value: true, writable: true },
+            _revision: { value: 0, writable: true },
+            _fingerprint: { value: "", writable: true },
             _documentId: { value: documentId },
             parent: { value: null, writable: true, enumerable: true },
             layers: { value: [], enumerable: true }
@@ -2771,6 +2880,15 @@
                 params[property] = value;
                 queueWrite("setLayer", params, () => {
                   layer._data[property] = value;
+                  const descriptor = layer._data.descriptor;
+                  if (descriptor) {
+                    if (property === "name" || property === "visible") descriptor[property] = value;
+                    else if (property === "opacity") descriptor.opacity = Number(value) * 255 / 100;
+                    else if (property === "blendMode") descriptor.mode = Object.assign({}, descriptor.mode, { _value: value });
+                  }
+                }, () => {
+                  invalidateLayer(layer, property !== "name");
+                  if (property !== "visible") requireDocument(documentId)._revision = contentRevision;
                 });
               }
             });
@@ -2818,9 +2936,15 @@
             _data: { value: {}, writable: true },
             _present: { value: true, writable: true },
             _revision: { value: 0, writable: true },
+            _snapshotRevision: { value: 0, writable: true },
+            _metadataRevision: { value: 0, writable: true },
             layers: { value: [], enumerable: true },
             activeLayers: { enumerable: true, get() {
               return (document2._data.activeLayerIds || []).map((id) => layerCache.get(String(document2.id) + ":" + String(id))).filter((layer) => layer && layer._present);
+            } },
+            saved: { enumerable: true, get() {
+              const known = snapshotProbe && snapshotProbe.documents.find((entry) => String(entry.id) === String(document2.id));
+              return known && known.saved;
             } }
           });
           defineDataProperties(document2, ["id", "title", "name", "path", "width", "height", "resolution", "xmp"]);
@@ -2862,9 +2986,7 @@
           documentCache.forEach((document2) => {
             document2._present = false;
           });
-          layerCache.forEach((layer) => {
-            layer._present = false;
-          });
+          const retainedLayers = /* @__PURE__ */ new Set();
           const next = state.documents.map((data) => {
             const key = String(data.id);
             let document2 = documentCache.get(key);
@@ -2875,24 +2997,73 @@
             }
             document2._data = data;
             document2._present = true;
-            if (!sameLayers) document2._revision = contentRevision;
+            if (!sameLayers) {
+              document2._revision = document2._snapshotRevision = contentRevision;
+              document2._metadataRevision = contentRevision;
+            }
+            if (!geometryDirty.has(key)) geometryDirty.set(key, /* @__PURE__ */ new Set());
+            const dirty = geometryDirty.get(key);
             function patchLayers(values, parent) {
               return (values || []).map((entry) => {
                 const layerKey = key + ":" + String(entry.id);
+                retainedLayers.add(layerKey);
                 let layer = layerCache.get(layerKey);
                 if (!layer) {
                   layer = makeLayer(data.id, entry);
                   layerCache.set(layerKey, layer);
                 }
-                layer._data = entry;
+                const oldData = layer._data;
+                const oldParent = layer.parent;
+                const oldChildren = layer.layers.map((child) => ({ layer: child, revision: child._revision }));
+                const fingerprint = JSON.stringify(Object.assign({}, entry, {
+                  layers: void 0,
+                  deferredBounds: void 0,
+                  bounds: entry.kind === "group" ? void 0 : entry.bounds,
+                  boundsNoEffects: entry.kind === "group" ? void 0 : entry.boundsNoEffects
+                }));
+                const ownChanged = oldParent !== parent || layer._fingerprint !== fingerprint || !entry.deferredBounds && entry.kind === "group" && (JSON.stringify(oldData.bounds) !== JSON.stringify(entry.bounds) || JSON.stringify(oldData.boundsNoEffects) !== JSON.stringify(entry.boundsNoEffects));
                 layer._present = true;
                 layer.parent = parent;
                 replaceArray(layer.layers, patchLayers(entry.layers, layer));
+                const changed = ownChanged || oldChildren.length !== layer.layers.length || layer.layers.some((child, index) => child !== oldChildren[index].layer || child._revision !== oldChildren[index].revision);
+                if (entry.deferredBounds) {
+                  if (oldData.bounds) entry.bounds = oldData.bounds;
+                  if (oldData.boundsNoEffects) entry.boundsNoEffects = oldData.boundsNoEffects;
+                  if (changed) dirty.add(String(entry.id));
+                } else dirty.delete(String(entry.id));
+                layer._data = entry;
+                layer._fingerprint = fingerprint;
+                if (changed) layer._revision = contentRevision;
                 return layer;
               });
             }
-            replaceArray(document2.layers, patchLayers(data.layers, document2));
+            if (sameLayers) {
+              const retain = (values) => values.forEach((layer) => {
+                retainedLayers.add(key + ":" + String(layer.id));
+                retain(layer.layers);
+              });
+              retain(document2.layers);
+            } else replaceArray(document2.layers, patchLayers(data.layers, document2));
             return document2;
+          });
+          layerCache.forEach((layer, key) => {
+            if (!retainedLayers.has(key)) {
+              layer._present = false;
+              const owner = documentCache.get(String(layer._documentId));
+              if (!owner || !owner._present) layerCache.delete(key);
+            }
+          });
+          documentCache.forEach((document2, key) => {
+            if (!document2._present) {
+              documentCache.delete(key);
+              geometryDirty.delete(key);
+            } else {
+              const dirty = geometryDirty.get(key);
+              if (dirty) dirty.forEach((id) => {
+                const layer = layerCache.get(key + ":" + id);
+                if (!layer || !layer._present) dirty.delete(id);
+              });
+            }
           });
           replaceArray(documents, next);
           activeDocumentId = state.activeDocumentId;
@@ -2916,10 +3087,25 @@
           return JSON.stringify(value);
         }
         function contentSignature(stamp) {
-          return JSON.stringify(stamp, (key, value) => key === "activeDocumentId" || key === "activeLayerIds" ? void 0 : value);
+          return JSON.stringify(stamp, (key, value) => ["activeDocumentId", "activeLayerIds", "saved"].includes(key) ? void 0 : value);
         }
-        async function synchronize(stamp) {
-          if (!snapshotProbe || contentSignature(stamp) !== contentSignature(snapshotProbe)) return readState();
+        function checkCurrent(isCurrent) {
+          if (isCurrent && !isCurrent()) {
+            const error = new Error("Photoshop 已发生新的操作，合并后重新读取。");
+            error.code = "PSD2UI_REFRESH_SUPERSEDED";
+            throw error;
+          }
+        }
+        async function synchronize(stamp, hint, isCurrent) {
+          checkCurrent(isCurrent);
+          const notified = hint && (hint.visibility || hint.names || hint.full || hint.history);
+          if (notified || !snapshotProbe || contentSignature(stamp) !== contentSignature(snapshotProbe)) {
+            if (!await synchronizePresentation(stamp, hint, isCurrent)) {
+              const hintedIds = hint && hint.documentIds || [];
+              const force = notified && snapshotProbe ? (hintedIds.length ? hintedIds : [stamp.activeDocumentId]).filter((id) => stamp.documents.some((doc) => String(doc.id) === String(id))) : void 0;
+              return readState(force, isCurrent, Boolean(hint && hint.interactive));
+            }
+          }
           stamp.documents.forEach((data) => {
             requireDocument(data.id)._data.activeLayerIds = data.activeLayerIds.slice();
           });
@@ -2928,12 +3114,113 @@
           snapshotStamp = signature(stamp);
           return { activeDocumentId, version: app.version, documents: documents.map((document2) => document2._data) };
         }
-        async function readState(forceDocumentIds) {
+        async function synchronizePresentation(stamp, hint, isCurrent) {
+          if (!snapshotProbe || !hint || !(hint.visibility || hint.names) || hint.full) return false;
+          const withoutHistory = (value) => JSON.stringify(value, (key, entry) => ["activeDocumentId", "activeLayerIds", "historyId", "saved"].includes(key) ? void 0 : entry);
+          if (withoutHistory(stamp) !== withoutHistory(snapshotProbe)) return false;
+          const changed = stamp.documents.filter((doc, index) => doc.historyId !== snapshotProbe.documents[index].historyId);
+          if (changed.length > 1) return false;
+          const documentId = changed.length ? changed[0].id : hint.documentIds && hint.documentIds.length === 1 ? hint.documentIds[0] : stamp.activeDocumentId;
+          if (documentId == null) return false;
+          if ((hint.documentIds || []).some((id) => String(id) !== String(documentId))) return false;
+          const document2 = requireDocument(documentId);
+          const targets = /* @__PURE__ */ new Set();
+          function add(layer) {
+            targets.add(String(layer.id));
+          }
+          if (hint.allLayers) {
+            const visit = (layers) => layers.forEach((layer) => {
+              add(layer);
+              visit(layer.layers);
+            });
+            visit(document2.layers);
+          } else {
+            for (const id of hint.layerIds || []) {
+              const layer = layerCache.get(String(documentId) + ":" + String(id));
+              if (!layer || !layer._present) return false;
+              add(layer);
+            }
+          }
+          if (!targets.size) return false;
+          try {
+            const ids = Array.from(targets), values = [];
+            for (let offset = 0; offset < ids.length; offset += 32) {
+              checkCurrent(isCurrent);
+              const batch = ids.slice(offset, offset + 32);
+              const value = await request("readVisibility", { documentId, layerIds: batch, groupIds: [], names: hint.names === true, stamp });
+              checkCurrent(isCurrent);
+              if (!value || !Array.isArray(value.layers) || value.layers.length !== batch.length || new Set(value.layers.map((layer) => String(layer.id))).size !== batch.length || value.layers.some((layer) => !batch.includes(String(layer.id)) || typeof layer.visible !== "boolean" || hint.names && typeof layer.name !== "string")) return false;
+              values.push(...value.layers);
+              if (offset + 32 < ids.length) await yieldHost();
+            }
+            let anyChanged = false;
+            values.forEach((data) => {
+              const layer = requireLayer(documentId, data.id);
+              const changedVisibility = layer._data.visible !== data.visible;
+              const changedName = hint.names && layer._data.name !== data.name;
+              layer._data.visible = data.visible;
+              if (layer._data.descriptor) layer._data.descriptor.visible = data.visible;
+              if (hint.names) {
+                layer._data.name = data.name;
+                if (layer._data.descriptor) layer._data.descriptor.name = data.name;
+              }
+              if (data.bounds) layer._data.bounds = data.bounds;
+              if (data.boundsNoEffects) layer._data.boundsNoEffects = data.boundsNoEffects;
+              if (changedVisibility || changedName) {
+                anyChanged = true;
+                invalidateLayer(layer, changedVisibility);
+              }
+            });
+            if (anyChanged) {
+              document2._snapshotRevision = ++contentRevision;
+              if (hint.names) document2._revision = contentRevision;
+            }
+            return true;
+          } catch (error) {
+            if (["CEP_HOST_RESULT_UNKNOWN", "CEP_HOST_UNAVAILABLE", "PSD2UI_REFRESH_SUPERSEDED"].includes(error.code)) throw error;
+            return false;
+          }
+        }
+        function invalidateLayer(layer, geometry) {
+          const dirty = geometryDirty.get(String(layer._documentId));
+          const revision = ++contentRevision;
+          for (let current = layer; current && current._documentId != null; current = current.parent) {
+            current._revision = revision;
+            if (geometry && current.kind === "group" && dirty) dirty.add(String(current.id));
+          }
+          requireDocument(layer._documentId)._snapshotRevision = revision;
+        }
+        async function refreshGeometry(isCurrent) {
+          const document2 = app.activeDocument;
+          const dirty = document2 && geometryDirty.get(String(document2.id));
+          if (!dirty || !dirty.size) return;
+          const values = [];
+          for (const id of dirty) {
+            checkCurrent(isCurrent);
+            const value = await request("readGeometry", { documentId: document2.id, layerIds: [id], stamp: snapshotProbe });
+            checkCurrent(isCurrent);
+            if (!value || !value.layers || value.layers.length !== 1 || String(value.layers[0].id) !== id || !value.layers[0].bounds || !value.layers[0].boundsNoEffects) throw new Error("Photoshop 组边界读回不完整。");
+            values.push(value.layers[0]);
+            await yieldHost();
+          }
+          values.forEach((value) => {
+            const layer = requireLayer(document2.id, value.id);
+            layer._data.bounds = value.bounds;
+            layer._data.boundsNoEffects = value.boundsNoEffects;
+            layer._data.deferredBounds = false;
+            invalidateLayer(layer, false);
+          });
+          dirty.clear();
+          document2._revision = ++contentRevision;
+        }
+        async function readState(forceDocumentIds, isCurrent, deferGeometry) {
           for (let attempt = 0; ; attempt++) {
             try {
+              checkCurrent(isCurrent);
               const forced = new Set((forceDocumentIds || []).map(String));
               const knownDocuments = snapshotProbe ? snapshotProbe.documents.filter((document2) => !forced.has(String(document2.id))) : [];
-              const begin = await request("beginState", { knownDocuments });
+              const begin = await request("beginState", { knownDocuments, deferGeometry: deferGeometry === true });
+              checkCurrent(isCurrent);
               const reused = new Set((begin.reusedDocumentIds || []).map(String));
               const snapshot = Object.assign({}, begin.stamp, {
                 documents: begin.stamp.documents.map((document2) => Object.assign({}, document2, {
@@ -2943,9 +3230,11 @@
               const owners = new Map(snapshot.documents.map((document2) => [String(document2.id), document2]));
               const layers = /* @__PURE__ */ new Map();
               let count = 0;
-              for (; ; ) {
+              for (; !begin.done; ) {
                 await yieldHost();
+                checkCurrent(isCurrent);
                 const page = await request("statePage", { token: begin.token });
+                checkCurrent(isCurrent);
                 page.items.forEach((item) => {
                   const key = String(item.documentId) + ":";
                   const parent = item.parentId == null ? owners.get(String(item.documentId)) : layers.get(key + item.parentId);
@@ -2964,6 +3253,7 @@
               snapshotStamp = signature(begin.stamp);
               return snapshot;
             } catch (error) {
+              checkCurrent(isCurrent);
               if (error.code !== "PSD2UI_STATE_CHANGED" || attempt >= 1) throw error;
               await yieldHost();
             }
@@ -2972,21 +3262,33 @@
         async function send(method, params) {
           if (method === "state") return readState(documents.map((document2) => document2.id));
           const value = await request(method, params);
-          if (["probe", "notificationEvents", "getXmp", "readManifest", "chooseFolder", "beginHistory"].indexOf(method) < 0) {
-            await readState();
+          if (["probe", "notificationEvents", "getXmp", "readManifest", "readVisibility", "readGeometry", "chooseFolder", "beginHistory"].indexOf(method) < 0) {
+            if (method === "duplicate" && params.targetDocumentId != null) await readState([params.targetDocumentId]);
+            else await synchronize(await request("probe", {}));
+            if (method === "activate" || method === "open") await reconcileActivation();
             if (["setXmp", "writeManifest"].indexOf(method) >= 0) {
               const document2 = requireDocument(params.documentId != null ? params.documentId : params.documentID);
-              document2._revision = ++contentRevision;
+              document2._revision = document2._metadataRevision = ++contentRevision;
             }
           }
           return value;
         }
+        async function reconcileActivation() {
+          if (!app.activeDocument) return;
+          if (!await synchronizePresentation(snapshotProbe, { visibility: true, allLayers: true }) && app.activeDocument.layers.length) {
+            await readState([app.activeDocument.id]);
+          }
+          await refreshGeometry();
+        }
         async function drainWrites() {
           let changed = false;
+          let activated = false;
           while (pendingWrites.length) {
             const write = pendingWrites.shift();
             try {
               await request(write.method, write.params);
+              if (write.committed) write.committed();
+              if (write.method === "activate") activated = true;
               changed = true;
             } catch (error) {
               pendingWrites = [];
@@ -2998,7 +3300,10 @@
               throw error;
             }
           }
-          if (changed) await readState();
+          if (changed) {
+            await readState();
+            if (activated) await reconcileActivation();
+          }
         }
         function invoke(method, params) {
           return schedule(async () => {
@@ -3009,10 +3314,20 @@
         function flush() {
           return schedule(drainWrites);
         }
-        function refresh() {
+        function refresh(hint, isCurrent) {
           return schedule(async () => {
+            checkCurrent(isCurrent);
             await drainWrites();
-            return synchronize(await request("probe", {}));
+            const previousDocumentId = activeDocumentId;
+            const result = await synchronize(await request("probe", {}), hint, isCurrent);
+            const switchedDocument = previousDocumentId != null && String(previousDocumentId) !== String(activeDocumentId);
+            if ((switchedDocument || hint && (hint.verifyVisibility || hint.reconcileVisibility)) && app.activeDocument) {
+              if (!await synchronizePresentation(snapshotProbe, { visibility: true, allLayers: true }, isCurrent) && app.activeDocument.layers.length) {
+                return readState([app.activeDocument.id], isCurrent, Boolean(hint && hint.interactive));
+              }
+            }
+            if (!hint || !hint.interactive && !hint.metadataOnly) await refreshGeometry(isCurrent);
+            return result;
           });
         }
         const app = { documents };
@@ -3074,7 +3389,8 @@
             return schedule(async () => {
               await drainWrites();
               const results = [];
-              for (const command of commands) {
+              for (let index = 0; index < commands.length; index++) {
+                const command = commands[index];
                 const target = targetFor(command);
                 if (command._obj === "get") {
                   if (target.property === "XMPMetadataAsUTF8") {
@@ -3084,9 +3400,19 @@
                   await send("setXmp", { documentId: target.document.id, xmp: command.to.XMPMetadataAsUTF8 });
                   results.push({});
                 } else if (command._obj === "select" && target.layer) {
+                  const ids = [target.layer.id];
+                  while (index + 1 < commands.length) {
+                    const next = commands[index + 1];
+                    if (next._obj !== "select" || !next.selectionModifier || next.selectionModifier._value !== "addToSelection") break;
+                    const nextTarget = targetFor(next);
+                    if (!nextTarget.layer || nextTarget.document !== target.document) break;
+                    ids.push(nextTarget.layer.id);
+                    results.push({});
+                    index++;
+                  }
                   await send("select", {
                     documentId: target.document.id,
-                    layerIds: [target.layer.id],
+                    layerIds: ids,
                     add: Boolean(command.selectionModifier && command.selectionModifier._value === "addToSelection"),
                     makeVisible: command.makeVisible === true
                   });
@@ -3108,18 +3434,111 @@
           }
         };
         const core = {
+          recordPerformance: require_performance().record,
+          readPngSize(file) {
+            return (configuration.imaging || require_imaging()).readPngSize(file);
+          },
+          samePngContent(first, second) {
+            return (configuration.imaging || require_imaging()).samePngContent(first, second);
+          },
+          getExportSourceCheckpoint(documentId) {
+            const source = requireDocument(documentId);
+            const known = snapshotProbe && snapshotProbe.documents.find((document2) => String(document2.id) === String(source.id));
+            if (!known || String(activeDocumentId) !== String(source.id) || pendingWrites.length) {
+              const error = new Error("[PSD2UI_EXPORT_SOURCE_CHANGED] 导出源文档状态尚未同步，请重新导出。");
+              error.code = "PSD2UI_EXPORT_SOURCE_CHANGED";
+              throw error;
+            }
+            const visibility = [];
+            const visit = (layers) => layers.forEach((layer) => {
+              visibility.push([String(layer.id), layer.visible]);
+              visit(layer.layers);
+            });
+            visit(source.layers);
+            visibility.sort((left, right) => left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0);
+            return JSON.stringify([
+              String(source.id),
+              known.historyId,
+              known.path,
+              known.name,
+              known.width,
+              known.height,
+              known.resolution,
+              visibility
+            ]);
+          },
+          async verifyExportSourceCheckpoint(documentId, checkpoint) {
+            await refresh({ verifyVisibility: true });
+            if (typeof checkpoint !== "string" || core.getExportSourceCheckpoint(documentId) !== checkpoint) {
+              const error = new Error("[PSD2UI_EXPORT_SOURCE_CHANGED] 导出期间源 PSD 已变化，输出尚未写入，请重新导出。");
+              error.code = "PSD2UI_EXPORT_SOURCE_CHANGED";
+              throw error;
+            }
+          },
+          exportLayerPng(input) {
+            return schedule(async () => {
+              await drainWrites();
+              const source = requireDocument(input.documentId);
+              const layer = requireLayer(source.id, input.layerId);
+              const known = snapshotProbe && snapshotProbe.documents.find((document2) => String(document2.id) === String(source.id));
+              if (!known || String(activeDocumentId) !== String(source.id)) throw new Error("导出源文档状态已变化，请重新导出。");
+              const path = nativePath(input.path);
+              const value = await request("exportLayerPng", {
+                documentId: source.id,
+                layerId: layer.id,
+                path,
+                compression: input.compression == null ? 6 : input.compression,
+                expectedHistoryId: known.historyId,
+                sourceBounds: { left: Number(layer.bounds.left), top: Number(layer.bounds.top) }
+              });
+              const normalize = (name) => String(name || "").replace(/\\/g, "/").toLowerCase();
+              const stamp = value && value.stamp;
+              const returnedSource = stamp && Array.isArray(stamp.documents) && stamp.documents.find((document2) => String(document2.id) === String(source.id));
+              if (!value || value.closed !== true || String(value.documentId) !== String(source.id) || String(value.layerId) !== String(layer.id) || normalize(value.path) !== normalize(path) || !Number.isInteger(value.width) || value.width <= 0 || !Number.isInteger(value.height) || value.height <= 0 || value.temporaryDocumentId == null || String(value.temporaryDocumentId) === String(source.id) || String(value.activeDocumentId) !== String(source.id) || !returnedSource || String(stamp.activeDocumentId) !== String(source.id) || stamp.documents.some((document2) => String(document2.id) === String(value.temporaryDocumentId))) {
+                throw new Error("Photoshop 图片导出回执不完整，已停止发布输出。");
+              }
+              if (contentSignature({ documents: [known] }) !== contentSignature({ documents: [returnedSource] })) {
+                throw new Error("导出期间源 PSD 已变化，已停止发布输出。");
+              }
+              await synchronize(stamp);
+              return value;
+            });
+          },
           // A selection change keeps the revision. Complete snapshots (including XMP
           // writes/undo) invalidate panel projections; optimistic writes are never cached.
           getDocumentRevision() {
             const document2 = app.activeDocument;
-            return document2 && !operations && !pendingWrites.length && !modalRunning ? document2._revision : null;
+            return document2 && !operations && !pendingWrites.length && !modalRunning && !modalPending ? document2._revision : null;
+          },
+          // 显隐会使图层投影失效，但不会使已保存的组件配置失效。
+          getSnapshotRevision() {
+            const document2 = app.activeDocument;
+            return document2 && !operations && !pendingWrites.length && !modalRunning && !modalPending ? document2._snapshotRevision : null;
+          },
+          getLayerRevision(layer) {
+            return layer && !operations && !pendingWrites.length ? layer._revision : null;
+          },
+          getMetadataRevision(document2) {
+            return (document2 || app.activeDocument)._metadataRevision;
+          },
+          getContentToken(document2) {
+            const source = document2 || app.activeDocument;
+            return source && !pendingWrites.length ? [source.id, source.path, source._snapshotRevision].join("|") : null;
+          },
+          invalidateMetadata() {
+            if (app.activeDocument) app.activeDocument._metadataRevision = app.activeDocument._revision = ++contentRevision;
+          },
+          hasDeferredSnapshot() {
+            const dirty = app.activeDocument && geometryDirty.get(String(app.activeDocument.id));
+            return Boolean(dirty && dirty.size);
           },
           isBusy() {
-            return modalRunning || operations > 0 || pendingWrites.length > 0;
+            return modalRunning || modalPending > 0 || operations > 0 || pendingWrites.length > 0;
           },
           // Serializes this plugin's work only. CEP cannot acquire UXP's native modal
           // lock; host methods validate document/layer identity on every mutation.
-          executeAsModal(callback) {
+          executeAsModal(callback, options2) {
+            modalPending += 1;
             const run = async () => {
               modalRunning = true;
               const histories = [];
@@ -3141,7 +3560,7 @@
                 }
               };
               try {
-                await refresh();
+                await refresh(options2 && options2.metadataOnly ? { metadataOnly: true } : void 0);
                 const value = await callback({ hostControl, isCancelled: false });
                 await flush();
                 if (histories.length) throw new Error("Photoshop 历史事务未结束，已请求恢复。");
@@ -3168,15 +3587,18 @@
               }
             };
             const result = modalTail.then(run);
-            modalTail = result.catch(() => {
-            });
+            const finished = () => {
+              modalPending -= 1;
+              notifyIdle();
+            };
+            modalTail = result.then(finished, finished);
             return result;
           }
         };
-        async function poll() {
-          if (modalRunning || operations || pendingWrites.length) return { skipped: true };
-          await refresh();
-          const next = snapshotStamp;
+        async function poll(hint, isCurrent) {
+          if (modalRunning || modalPending || operations || pendingWrites.length) return { skipped: true };
+          await refresh(Object.assign({}, hint, { interactive: true }), isCurrent);
+          const next = snapshotStamp + "|" + contentRevision;
           if (next !== stateSignature) {
             stateSignature = next;
             listeners.slice().forEach((entry) => {
@@ -3200,13 +3622,17 @@
           refresh,
           flush,
           poll,
+          addIdleListener(listener) {
+            idleListeners.add(listener);
+            return () => idleListeners.delete(listener);
+          },
           async initialize() {
             const value = await refresh();
-            stateSignature = snapshotStamp;
+            stateSignature = snapshotStamp + "|" + contentRevision;
             return value;
           },
           isBusy() {
-            return modalRunning || operations > 0 || pendingWrites.length > 0;
+            return modalRunning || modalPending > 0 || operations > 0 || pendingWrites.length > 0;
           }
         };
         Object.defineProperty(facade2, "imaging", { enumerable: true, get() {
@@ -3314,7 +3740,7 @@
               json(response, 200, __spreadValues({
                 protocol: Protocol,
                 pluginId: PluginId,
-                pluginVersion: "0.3.8",
+                pluginVersion: "0.4.6",
                 transport: "cep",
                 instanceId,
                 methods: AllowedMethods
@@ -3413,48 +3839,164 @@
   var require_notifications = __commonJS({
     "Plus-ins/PSD2UI-CEP/src/notifications.js"(exports, module) {
       "use strict";
+      var eventNames = [
+        "select",
+        "open",
+        "close",
+        "make",
+        "delete",
+        "set",
+        "move",
+        "transform",
+        "show",
+        "hide",
+        "undo",
+        "redo",
+        "historyStateChanged"
+      ];
+      function notificationHint(event, ids) {
+        try {
+          let visit = function(value) {
+            if (!value || typeof value !== "object") return;
+            if (value._ref === "layer" && value._id != null) layerIds.push(String(value._id));
+            if (value._ref === "document" && value._id != null) documentIds.push(String(value._id));
+            Object.keys(value).forEach((key) => visit(value[key]));
+          };
+          let data = event && event.data;
+          if (typeof data === "string") data = JSON.parse(data);
+          if (!data) return { full: true };
+          const index = (ids || []).findIndex((id) => String(id) === String(data.eventID));
+          const name = index >= 0 ? eventNames[index] : String(data.eventID || "");
+          if (name === "select") return {};
+          if (name === "historyStateChanged") return { history: true };
+          if (!["show", "hide", "set"].includes(name)) return { full: true };
+          let descriptor = data.eventData;
+          if (typeof descriptor === "string") descriptor = JSON.parse(descriptor);
+          const names = name === "set";
+          if (names && (!descriptor || !descriptor.to || descriptor.to._obj !== "layer" || typeof descriptor.to.name !== "string" || Object.keys(descriptor.to).some((key) => key !== "_obj" && key !== "name") || Object.keys(descriptor).some((key) => !["_obj", "_target", "null", "to", "_options"].includes(key)))) return { full: true };
+          const layerIds = [], documentIds = [];
+          visit(descriptor);
+          if (names && !layerIds.length) return { full: true };
+          return { visibility: !names, names, layerIds, documentIds, allLayers: layerIds.length === 0 };
+        } catch (_) {
+          return { full: true };
+        }
+      }
+      function mergeHints(left, right) {
+        return {
+          full: Boolean(left.full || right.full),
+          history: Boolean(left.history || right.history),
+          reconcileVisibility: Boolean(left.reconcileVisibility || right.reconcileVisibility),
+          visibility: Boolean(left.visibility || right.visibility),
+          names: Boolean(left.names || right.names),
+          allLayers: Boolean(left.allLayers || right.allLayers),
+          layerIds: Array.from(/* @__PURE__ */ new Set([...left.layerIds || [], ...right.layerIds || []])),
+          documentIds: Array.from(/* @__PURE__ */ new Set([...left.documentIds || [], ...right.documentIds || []]))
+        };
+      }
       async function startNotifications(options) {
         const { bridge, photoshop, document: document2, window: window2 } = options;
         const later = options.setTimeout || setTimeout;
         const cancel = options.clearTimeout || clearTimeout;
+        const now = options.now || Date.now;
         const report = options.onError || ((error) => console.error("PSD2UI 刷新失败：", error.message));
-        let closed = false, running = false, dirty = false, timer = null, watchdog = null;
+        let closed = false, running = false, dirty = false, timer = null, watchdog = null, generation = 0;
         let eventType, extensionId, eventIds, appId;
+        let pending = {};
+        let pendingSince = null;
+        let hidden = document2.hidden === true;
+        let focused = false;
         function blocked() {
           return document2.hidden === true || photoshop.isBusy() || options.isBusy() || options.isUncertain();
         }
         function schedule(delay) {
           if (closed) return;
           dirty = true;
+          if (pendingSince == null) pendingSince = now();
           if (timer != null) cancel(timer);
-          timer = later(refresh, delay);
+          timer = null;
+          if (document2.hidden === true) {
+            hidden = true;
+            focused = false;
+            cancel(watchdog);
+            watchdog = null;
+            return;
+          }
+          if (options.isUncertain()) return;
+          const selectionOnly = !pending.full && !pending.history && !pending.visibility && !pending.names && !pending.reconcileVisibility;
+          const wait = delay === 120 && selectionOnly ? Math.min(delay, Math.max(0, 500 - (now() - pendingSince))) : delay;
+          timer = later(refresh, wait);
         }
         async function refresh() {
           timer = null;
           if (closed || options.isUncertain()) return;
           if (document2.hidden === true) return;
           if (running || blocked()) {
-            schedule(200);
+            dirty = true;
+            if (!removeIdle || !photoshop.isBusy()) schedule(200);
             return;
           }
           dirty = false;
+          pendingSince = null;
           running = true;
+          const hint = pending;
+          const startedGeneration = generation;
+          pending = {};
           try {
-            const result = await photoshop.poll();
-            if (result && result.skipped) dirty = true;
+            const result = await photoshop.poll(hint, () => !closed && document2.hidden !== true && generation === startedGeneration);
+            if (result && result.skipped) {
+              dirty = true;
+              pending = mergeHints(hint, pending);
+            }
           } catch (error) {
-            report(error);
+            if (error.code === "PSD2UI_REFRESH_SUPERSEDED") {
+              dirty = true;
+              pending = mergeHints(hint, pending);
+            } else {
+              pending = { full: true };
+              report(error);
+            }
           } finally {
             running = false;
-            if (dirty && !closed) schedule(120);
+            if (dirty && !closed && timer == null) schedule(120);
           }
         }
-        function changed() {
+        function changed(event) {
+          generation += 1;
+          pending = mergeHints(pending, notificationHint(event, eventIds));
           schedule(120);
         }
-        function visible() {
-          if (document2.hidden !== true) changed();
+        function reconcile() {
+          pending = mergeHints(pending, { reconcileVisibility: true });
+          schedule(120);
+          armWatchdog();
         }
+        function focus() {
+          if (document2.hidden === true || focused) return;
+          focused = true;
+          reconcile();
+        }
+        function blur() {
+          focused = false;
+        }
+        function visible() {
+          const nextHidden = document2.hidden === true;
+          if (nextHidden === hidden) return;
+          hidden = nextHidden;
+          if (!hidden) {
+            reconcile();
+            return;
+          }
+          focused = false;
+          generation += 1;
+          cancel(timer);
+          timer = null;
+          cancel(watchdog);
+          watchdog = null;
+        }
+        const removeIdle = typeof photoshop.addIdleListener === "function" ? photoshop.addIdleListener(() => {
+          if (dirty && !running && timer == null && !closed) schedule(120);
+        }) : null;
         function register(type) {
           bridge.dispatchEvent({ type, scope: "APPLICATION", appId, extensionId, data: eventIds.join(",") });
         }
@@ -3476,20 +4018,30 @@
           report(error);
         }
         if (document2.addEventListener) document2.addEventListener("visibilitychange", visible);
-        window2.addEventListener("focus", visible);
+        window2.addEventListener("focus", focus);
+        window2.addEventListener("blur", blur);
         function check() {
+          watchdog = null;
           if (closed || options.isUncertain()) return;
           if (!running && !blocked() && timer == null) schedule(0);
+          armWatchdog();
+        }
+        function armWatchdog() {
+          if (watchdog != null || closed || document2.hidden === true || options.isUncertain()) return;
           watchdog = later(check, subscribed ? 15e3 : 1500);
         }
-        watchdog = later(check, subscribed ? 15e3 : 1500);
+        armWatchdog();
         return {
           close() {
             closed = true;
             cancel(timer);
             cancel(watchdog);
             if (document2.removeEventListener) document2.removeEventListener("visibilitychange", visible);
-            if (window2.removeEventListener) window2.removeEventListener("focus", visible);
+            if (window2.removeEventListener) {
+              window2.removeEventListener("focus", focus);
+              window2.removeEventListener("blur", blur);
+            }
+            if (removeIdle) removeIdle();
             if (subscribed) {
               try {
                 register("com.adobe.PhotoshopUnRegisterEvent");
@@ -3501,7 +4053,7 @@
           }
         };
       }
-      module.exports = { startNotifications };
+      module.exports = { startNotifications, notificationHint, mergeHints };
     }
   });
 
@@ -4903,6 +5455,13 @@
         if (existing && existing.status !== "active") {
           fail("PSD2UI_RESOURCE_RETIRED", "图层 ".concat(layerId, " 绑定的资源已停用。"));
         }
+        if (existing && existing.exportSourceLayerId != null && String(existing.exportSourceLayerId) === layerId && existing.fileName !== parsed.fileName) {
+          fail(
+            "PSD2UI_SHARED_SLICE_SOURCE_INVALID",
+            "共用九宫 '".concat(existing.fileName, "' 的指定源图 ").concat(layerId, " 已改名，请重新指定源图。"),
+            { resourceId: existing.id, layerId }
+          );
+        }
         if (existing && existing.fileName === parsed.fileName && existing.kind === kind) {
           existing.module = parsed.group;
           existing.scope = "module";
@@ -5414,8 +5973,24 @@
           if (typeof node.text.value !== "string") {
             issues.push(issue("PSD2UI_TEXT_VALUE_REQUIRED", "文本内容必须显式填写。", "".concat(path, ".text.value")));
           }
+          if (Object.prototype.hasOwnProperty.call(node.text, "renderValue")) {
+            const renderValue = node.text.renderValue;
+            const valid = typeof renderValue === "string" && !renderValue.includes("\r") && /^(?:<color=#[0-9A-Fa-f]{8}>[^<]+<\/color>)+$/.test(renderValue) && renderValue.replace(/<color=#[0-9A-Fa-f]{8}>|<\/color>/g, "") === String(node.text.value || "").replace(/\r\n?/g, "\n") && node.text.richText === "enabled";
+            if (!valid) issues.push(issue(
+              "PSD2UI_TEXT_RENDER_VALUE_INVALID",
+              "renderValue 必须以完整 color 标签覆盖原文，移除标签后等于换行归一的 value，且 richText 为 enabled。",
+              "".concat(path, ".text.renderValue")
+            ));
+          }
           if (typeof node.text.fontKey !== "string" || !node.text.fontKey.trim()) {
             issues.push(issue("PSD2UI_FONT_KEY_REQUIRED", "文本必须提供 fontKey；未配置时使用 default。", "".concat(path, ".text.fontKey")));
+          }
+          if (Object.prototype.hasOwnProperty.call(node.text, "fontPostScriptName") && (typeof node.text.fontPostScriptName !== "string" || !node.text.fontPostScriptName.trim() || /[\x00-\x1F]/.test(node.text.fontPostScriptName))) {
+            issues.push(issue(
+              "PSD2UI_FONT_POSTSCRIPT_NAME_INVALID",
+              "fontPostScriptName 必须是非空、无控制字符的 Photoshop PostScript 字体名。",
+              "".concat(path, ".text.fontPostScriptName")
+            ));
           }
           validateTextEffects(node.text.effects, "".concat(path, ".text.effects"), issues);
           if (node.text.lineAdvance != null && (!Number.isFinite(node.text.lineAdvance) || node.text.lineAdvance <= 0)) {
@@ -5523,6 +6098,13 @@
         Object.keys(registry.resources).forEach((resourceId) => {
           const resource = registry.resources[resourceId];
           if (!resource || resource.status !== "active") return;
+          if (resource.exportSourceLayerId != null && (!sourceNaming || resource.kind !== "sprite" || typeof resource.exportSourceLayerId !== "string" || !resource.exportSourceLayerId.trim())) {
+            issues.push(issue(
+              "PSD2UI_SHARED_SLICE_SOURCE_INVALID",
+              "共用九宫源图必须是原名 Sprite 资源的有效图层 ID。",
+              "resourceRegistry.resources.".concat(resourceId, ".exportSourceLayerId")
+            ));
+          }
           let expected;
           try {
             if (sourceNaming) {
@@ -5746,9 +6328,16 @@
         if (node.semantic !== "text" || !node.text) return;
         if (!layer.text) {
           delete node.text.layoutMode;
+          delete node.text.renderValue;
+          delete node.text.fontPostScriptName;
           return;
         }
         if (typeof layer.text.value === "string") node.text.value = layer.text.value;
+        if (typeof layer.text.renderValue === "string") node.text.renderValue = layer.text.renderValue;
+        else delete node.text.renderValue;
+        if (typeof layer.text.fontPostScriptName === "string" && layer.text.fontPostScriptName.trim()) {
+          node.text.fontPostScriptName = layer.text.fontPostScriptName.trim();
+        } else delete node.text.fontPostScriptName;
         if (Number.isFinite(Number(layer.text.fontSize)) && Number(layer.text.fontSize) > 0) {
           node.text.fontSize = Math.max(1, Math.round(Number(layer.text.fontSize)));
         }
@@ -5957,6 +6546,18 @@
           if (!runtimeLayerIds.has(String(layerId))) return;
           const layer = topology.layersById[String(layerId)];
           const layerKind = normalizeLayerKind(layer);
+          if (layer.text && layer.text.renderWarning) diagnostics.push({
+            severity: "warning",
+            code: "PSD2UI_TEXT_RENDER_VALUE_SKIPPED",
+            nodeId: node.id || "",
+            message: "文字 '".concat(node.name || layer.name, "'：").concat(layer.text.renderWarning)
+          });
+          if (layer.text && layer.text.fontWarning) diagnostics.push({
+            severity: "warning",
+            code: "PSD2UI_TEXT_FONT_UNRESOLVED",
+            nodeId: node.id || "",
+            message: "文字 '".concat(node.name || layer.name, "'：").concat(layer.text.fontWarning)
+          });
           if (node.visualStates) {
             try {
               if (!isGroupLayer(layer)) fail("PSD2UI_VISUAL_STATE_ROOT_INVALID", "视觉状态只能配置在 Photoshop 组上。");
@@ -6184,6 +6785,8 @@
         if (layer.text) {
           state.text = {
             value: String(layer.text.value || ""),
+            renderValue: String(layer.text.renderValue || ""),
+            fontPostScriptName: String(layer.text.fontPostScriptName || ""),
             fontSize: number(layer.text.fontSize, 0),
             alignment: String(layer.text.alignment || ""),
             lineSpacing: number(layer.text.lineSpacing, 0),
@@ -6265,6 +6868,116 @@
     }
   });
 
+  // Plus-ins/PSD2UI/generated/core/nineSlice.js
+  var require_nineSlice = __commonJS({
+    "Plus-ins/PSD2UI/generated/core/nineSlice.js"(exports, module) {
+      "use strict";
+      var { fail } = require_errors();
+      function normalizeSliceBorder(value, width, height) {
+        if (!value) return null;
+        const result = {};
+        for (const key of ["left", "top", "right", "bottom"]) {
+          const number = Number(value[key]);
+          if (!Number.isInteger(number) || number < 0) {
+            fail("PSD2UI_SLICE_BORDER_INVALID", "九宫参数 ".concat(key, " 必须是大于或等于 0 的整数。"));
+          }
+          result[key] = number;
+        }
+        if (result.left + result.right >= width || result.top + result.bottom >= height) {
+          fail(
+            "PSD2UI_SLICE_BORDER_OUT_OF_RANGE",
+            "九宫固定边超出图片范围：图片 ".concat(width, "×").concat(height, "，边距 ").concat(result.left, ",").concat(result.top, ",").concat(result.right, ",").concat(result.bottom, "。")
+          );
+        }
+        return result;
+      }
+      function sourceCoordinate(outputCoordinate, leading, trailing, sourceSize) {
+        if (outputCoordinate < leading) return outputCoordinate;
+        if (outputCoordinate === leading) return leading;
+        return sourceSize - trailing + outputCoordinate - leading - 1;
+      }
+      function collapseNineSlicePixels(source, width, height, components, sliceBorder) {
+        if (!source || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0 || !Number.isInteger(components) || components <= 0) {
+          fail("PSD2UI_SLICE_PIXEL_INPUT_INVALID", "九宫像素处理缺少有效的图片尺寸或分量数。");
+        }
+        if (source.length !== width * height * components) {
+          fail("PSD2UI_SLICE_PIXEL_LENGTH_INVALID", "九宫像素缓冲区长度与图片尺寸不一致。");
+        }
+        const border = normalizeSliceBorder(sliceBorder, width, height);
+        const outputWidth = border.left + 1 + border.right;
+        const outputHeight = border.top + 1 + border.bottom;
+        const output = new source.constructor(outputWidth * outputHeight * components);
+        for (let y = 0; y < outputHeight; y += 1) {
+          const sourceY = sourceCoordinate(y, border.top, border.bottom, height);
+          for (let x = 0; x < outputWidth; x += 1) {
+            const sourceX = sourceCoordinate(x, border.left, border.right, width);
+            const sourceOffset = (sourceY * width + sourceX) * components;
+            const outputOffset = (y * outputWidth + x) * components;
+            for (let component = 0; component < components; component += 1) {
+              output[outputOffset + component] = source[sourceOffset + component];
+            }
+          }
+        }
+        return { pixels: output, width: outputWidth, height: outputHeight, border };
+      }
+      module.exports = { normalizeSliceBorder, collapseNineSlicePixels };
+    }
+  });
+
+  // Plus-ins/PSD2UI/generated/core/sharedNineSlice.js
+  var require_sharedNineSlice = __commonJS({
+    "Plus-ins/PSD2UI/generated/core/sharedNineSlice.js"(exports, module) {
+      "use strict";
+      var { fail } = require_errors();
+      var { normalizeSliceBorder } = require_nineSlice();
+      var { parseResourceLayerName } = require_naming();
+      function sharedNineSliceLayers(manifest, snapshot) {
+        if (!snapshot || !snapshot.root) fail("PSD2UI_SNAPSHOT_REQUIRED", "指定共用九宫源图需要当前图层树快照。");
+        const layers = {};
+        const index = (layer) => {
+          layers[String(layer.layerId)] = layer;
+          (layer.children || []).forEach(index);
+        };
+        index(snapshot.root);
+        const runtimeIds = /* @__PURE__ */ new Set();
+        const previews = /* @__PURE__ */ new Set();
+        const visit = (layer) => {
+          if (!layer) return;
+          const id = String(layer.layerId);
+          const node = manifest.nodes[id];
+          if (!node || node.semantic === "ignore" || node.exportMode === "preview-only" || previews.has(id)) return;
+          runtimeIds.add(id);
+          (node.structure && node.structure.previewLayerIds || []).forEach((previewId) => previews.add(String(previewId)));
+          (layer.children || []).forEach(visit);
+        };
+        visit(layers[String(manifest.document.rootLayerId)]);
+        return { layers, runtimeIds };
+      }
+      function sharedNineSliceSource(manifest, resource, layersById, runtimeIds) {
+        if (!resource || resource.exportSourceLayerId == null) return null;
+        const id = String(resource.exportSourceLayerId);
+        const node = manifest.nodes[id];
+        const layer = layersById[id];
+        if (manifest.resourceNaming !== "source" || resource.kind !== "sprite" || !layer || !node || !runtimeIds.has(id) || !node.image || node.image.imageType !== "sliced" || node.image.resourceId !== resource.id || parseResourceLayerName(layer.name, id).fileName !== resource.fileName) {
+          fail(
+            "PSD2UI_SHARED_SLICE_SOURCE_INVALID",
+            "共用九宫 '".concat(resource.fileName, "' 的指定源图 ").concat(id, " 已缺失、改名或不再是可导出的九宫图片，请重新指定源图。"),
+            { resourceId: resource.id, layerId: id }
+          );
+        }
+        const bounds = layer.bounds;
+        const border = normalizeSliceBorder(
+          node.image.sliceBorder,
+          Math.max(1, Math.round(bounds.right - bounds.left)),
+          Math.max(1, Math.round(bounds.bottom - bounds.top))
+        );
+        if (!border) fail("PSD2UI_SLICE_BORDER_REQUIRED", "共用九宫源图必须填写边距。", { layerId: id });
+        return { layerId: id, border };
+      }
+      module.exports = { sharedNineSliceSource, sharedNineSliceLayers };
+    }
+  });
+
   // Plus-ins/PSD2UI/generated/core/authoringCommands.js
   var require_authoringCommands = __commonJS({
     "Plus-ins/PSD2UI/generated/core/authoringCommands.js"(exports, module) {
@@ -6292,6 +7005,8 @@
         planStructuredGroup
       } = require_structure();
       var { prepareManifestForExport, captureBaseline } = require_snapshot();
+      var { sharedNineSliceSource, sharedNineSliceLayers } = require_sharedNineSlice();
+      var { parseResourceLayerName } = require_naming();
       function clone(value) {
         return value == null ? value : JSON.parse(JSON.stringify(value));
       }
@@ -6339,11 +7054,12 @@
         let manifest = {
           manifestVersion: submodule ? "1.1.0" : "1.0.0",
           revision: 1,
-          document: __spreadProps(__spreadValues({
+          document: __spreadProps(__spreadValues(__spreadProps(__spreadValues({
             id: idFactory("document"),
-            name,
+            name
+          }, input.sourcePath ? { sourcePath: String(input.sourcePath).trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase() } : {}), {
             module: moduleName
-          }, submodule ? { submodule } : {}), {
+          }), submodule ? { submodule } : {}), {
             width,
             height,
             coordSpace: "parent-top-left-px",
@@ -6698,6 +7414,29 @@
             case "reuse-resource":
               value = bindReusedResource(manifest, input);
               break;
+            case "set-shared-nine-slice-source": {
+              if (manifest.resourceNaming !== "source") fail("PSD2UI_SOURCE_NAMING_REQUIRED", "共用九宫源图需要使用图片原名资源模式。");
+              const id = normalizeLayerId(input.layerId);
+              const previousRegistry = ensureRegistry(manifest);
+              const selectedLayer = sharedNineSliceLayers(manifest, input.snapshot).layers[id];
+              const previousResource = previousRegistry.resources[previousRegistry.layerBindings[id]] || selectedLayer && Object.values(previousRegistry.resources).find((resource2) => resource2.status === "active" && resource2.fileName === parseResourceLayerName(selectedLayer.name, id).fileName);
+              if (previousResource) delete previousResource.exportSourceLayerId;
+              manifest = prepareManifestForExport(manifest, input.snapshot).manifest;
+              const registry = ensureRegistry(manifest);
+              const resource = registry.resources[registry.layerBindings[id]];
+              if (!resource || resource.kind !== "sprite") fail("PSD2UI_SHARED_SLICE_SOURCE_INVALID", "请选择可导出的 Sprite 图片图层。");
+              if (input.clear === true) {
+                delete resource.exportSourceLayerId;
+              } else {
+                const node = manifest.nodes[id];
+                if (!node.image || node.image.imageType !== "sliced") fail("PSD2UI_SHARED_SLICE_SOURCE_INVALID", "请先将当前图片设置并保存为九宫格。");
+                resource.exportSourceLayerId = id;
+                const { layers, runtimeIds } = sharedNineSliceLayers(manifest, input.snapshot);
+                sharedNineSliceSource(manifest, resource, layers, runtimeIds);
+              }
+              value = resource;
+              break;
+            }
             case "retire-resource":
               value = retireResource(manifest, input);
               break;
@@ -6762,62 +7501,6 @@
     }
   });
 
-  // Plus-ins/PSD2UI/generated/core/nineSlice.js
-  var require_nineSlice = __commonJS({
-    "Plus-ins/PSD2UI/generated/core/nineSlice.js"(exports, module) {
-      "use strict";
-      var { fail } = require_errors();
-      function normalizeSliceBorder(value, width, height) {
-        if (!value) return null;
-        const result = {};
-        for (const key of ["left", "top", "right", "bottom"]) {
-          const number = Number(value[key]);
-          if (!Number.isInteger(number) || number < 0) {
-            fail("PSD2UI_SLICE_BORDER_INVALID", "九宫参数 ".concat(key, " 必须是大于或等于 0 的整数。"));
-          }
-          result[key] = number;
-        }
-        if (result.left + result.right >= width || result.top + result.bottom >= height) {
-          fail(
-            "PSD2UI_SLICE_BORDER_OUT_OF_RANGE",
-            "九宫固定边超出图片范围：图片 ".concat(width, "×").concat(height, "，边距 ").concat(result.left, ",").concat(result.top, ",").concat(result.right, ",").concat(result.bottom, "。")
-          );
-        }
-        return result;
-      }
-      function sourceCoordinate(outputCoordinate, leading, trailing, sourceSize) {
-        if (outputCoordinate < leading) return outputCoordinate;
-        if (outputCoordinate === leading) return leading;
-        return sourceSize - trailing + outputCoordinate - leading - 1;
-      }
-      function collapseNineSlicePixels(source, width, height, components, sliceBorder) {
-        if (!source || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0 || !Number.isInteger(components) || components <= 0) {
-          fail("PSD2UI_SLICE_PIXEL_INPUT_INVALID", "九宫像素处理缺少有效的图片尺寸或分量数。");
-        }
-        if (source.length !== width * height * components) {
-          fail("PSD2UI_SLICE_PIXEL_LENGTH_INVALID", "九宫像素缓冲区长度与图片尺寸不一致。");
-        }
-        const border = normalizeSliceBorder(sliceBorder, width, height);
-        const outputWidth = border.left + 1 + border.right;
-        const outputHeight = border.top + 1 + border.bottom;
-        const output = new source.constructor(outputWidth * outputHeight * components);
-        for (let y = 0; y < outputHeight; y += 1) {
-          const sourceY = sourceCoordinate(y, border.top, border.bottom, height);
-          for (let x = 0; x < outputWidth; x += 1) {
-            const sourceX = sourceCoordinate(x, border.left, border.right, width);
-            const sourceOffset = (sourceY * width + sourceX) * components;
-            const outputOffset = (y * outputWidth + x) * components;
-            for (let component = 0; component < components; component += 1) {
-              output[outputOffset + component] = source[sourceOffset + component];
-            }
-          }
-        }
-        return { pixels: output, width: outputWidth, height: outputHeight, border };
-      }
-      module.exports = { normalizeSliceBorder, collapseNineSlicePixels };
-    }
-  });
-
   // Plus-ins/PSD2UI/generated/core/bundle.js
   var require_bundle = __commonJS({
     "Plus-ins/PSD2UI/generated/core/bundle.js"(exports, module) {
@@ -6827,6 +7510,7 @@
       var { ensureRegistry } = require_resourceRegistry();
       var { prepareManifestForExport, collectUnconfiguredEmptyGroupIds } = require_snapshot();
       var { normalizeSliceBorder } = require_nineSlice();
+      var { sharedNineSliceSource } = require_sharedNineSlice();
       var { collectInvalidImageLayerNames, collectInvalidLayerNames, stripLegacyLayerSuffix } = require_naming();
       function prepareSourceManifest(manifest, snapshot, options) {
         const source = JSON.parse(JSON.stringify(manifest || null));
@@ -6934,6 +7618,13 @@
           (layer.children || []).forEach(collectRuntimeNodes);
         }
         collectRuntimeNodes(snapshotRoot);
+        const sharedSources = /* @__PURE__ */ new Map();
+        runtimeNodes.forEach((node) => {
+          const resourceId = node.image && node.image.resourceId;
+          if (!resourceId || sharedSources.has(resourceId)) return;
+          const source = sharedNineSliceSource(exportManifest, registry.resources[resourceId], byId, runtimeNodes);
+          if (source) sharedSources.set(resourceId, source);
+        });
         runtimeNodes.forEach((authored) => {
           if (sourceNaming && authored.visualStates) {
             const visualStates = authored.visualStates;
@@ -7002,7 +7693,7 @@
           let normalizedSlice = null;
           if (sliceBorder) {
             try {
-              normalizedSlice = normalizeSliceBorder(sliceBorder, Math.max(1, Math.round(width)), Math.max(1, Math.round(height)));
+              normalizedSlice = sharedSources.has(resourceId) ? sharedSources.get(resourceId).border : normalizeSliceBorder(sliceBorder, Math.max(1, Math.round(width)), Math.max(1, Math.round(height)));
             } catch (error) {
               error.details = __spreadProps(__spreadValues({}, error.details || {}), { layerId, resourceId });
               throw error;
@@ -7050,7 +7741,15 @@
             button: cloneComponent(authored.button),
             children: []
           };
-          if (!sourceNaming && node.text) delete node.text.layoutMode;
+          if (!sourceNaming && node.text) {
+            delete node.text.layoutMode;
+            delete node.text.renderValue;
+            delete node.text.fontPostScriptName;
+          }
+          if (sourceNaming && node.text && layer.text && layer.text.fontWarning) {
+            node.text.fontKey = "default";
+            delete node.text.fontPostScriptName;
+          }
           if (sourceNaming && authored.viewport) {
             node.rect.width = authored.viewport.width;
             node.rect.height = authored.viewport.height;
@@ -7065,6 +7764,15 @@
             };
           }
           if (node.image && node.image.resourceId) {
+            const shared = sharedSources.get(node.image.resourceId);
+            if (shared) {
+              if (node.image.imageType !== "sliced") fail(
+                "PSD2UI_SHARED_SLICE_REFERENCE_INVALID",
+                "共用九宫 '".concat(node.name, "' 的引用层 ").concat(layerId, " 必须使用九宫格类型。"),
+                { layerId }
+              );
+              node.image.sliceBorder = cloneComponent(shared.border);
+            }
             useResource(node.image.resourceId, node.image.sliceBorder, node.rect.width, node.rect.height, layerId);
           }
           if (node.rawImage && node.rawImage.resourceId) useResource(node.rawImage.resourceId, null, 0, 0, layerId);
@@ -7090,8 +7798,9 @@
             fail("PSD2UI_BUNDLE_RESOURCE_MISSING", "Bundle 引用了无效资源 '".concat(resourceId, "'。"), { resourceId, layerIds: [...resourceSourceLayers.get(resourceId) || []] });
           }
           const sourceLayerIds = Array.from(resourceSourceLayers.get(resourceId) || []);
-          const sourceLayerId = sourceLayerIds.includes(String(resource.sourceLayerId)) ? String(resource.sourceLayerId) : sourceLayerIds[0];
-          return __spreadProps(__spreadValues(__spreadProps(__spreadValues({
+          const shared = sharedSources.get(resourceId);
+          const sourceLayerId = shared ? shared.layerId : sourceLayerIds.includes(String(resource.sourceLayerId)) ? String(resource.sourceLayerId) : sourceLayerIds[0];
+          return __spreadProps(__spreadValues(__spreadValues(__spreadProps(__spreadValues({
             id: resource.id,
             kind: resource.kind,
             scope: resource.scope,
@@ -7100,7 +7809,7 @@
             number: resource.number,
             fileName: resource.fileName,
             sourceLayerId: sourceNaming ? sourceLayerId : resource.sourceLayerId
-          }), sourceNaming ? { sourceLayerIds } : {}), {
+          }), sourceNaming ? { sourceLayerIds } : {}), shared ? { exportSourceLayerId: shared.layerId } : {}), {
             sliceBorder: usedResources.get(resourceId)
           });
         }).sort((left, right) => left.fileName.localeCompare(right.fileName));
@@ -7297,6 +8006,33 @@
     }
   });
 
+  // Plus-ins/PSD2UI/generated/core/documentIdentity.js
+  var require_documentIdentity = __commonJS({
+    "Plus-ins/PSD2UI/generated/core/documentIdentity.js"(exports, module) {
+      "use strict";
+      var { createId } = require_ids();
+      function normalizeDocumentPath(path) {
+        return String(path || "").trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+      }
+      function bindDocumentIdentity(manifest, documentInfo, options) {
+        if (!manifest || !manifest.document) throw new Error("PSD 配置缺少 document。");
+        const path = normalizeDocumentPath(documentInfo && documentInfo.path);
+        const name = String(documentInfo && documentInfo.name || "").trim();
+        if (!path || !name) throw new Error("PSD 文件路径或名称不可用，无法绑定文档身份。");
+        const source = manifest.document;
+        const previousPath = normalizeDocumentPath(source.sourcePath);
+        const copied = previousPath ? previousPath !== path : String(source.name || "") !== name;
+        const changed = copied || source.name !== name || source.sourcePath !== path;
+        if (!changed) return { manifest, copied: false, changed: false };
+        const idFactory = options && options.idFactory || createId;
+        const document2 = __spreadProps(__spreadValues({}, source), { name, sourcePath: path });
+        if (copied) document2.id = idFactory("document");
+        return { manifest: __spreadProps(__spreadValues({}, manifest), { document: document2 }), copied, changed: true };
+      }
+      module.exports = { bindDocumentIdentity, normalizeDocumentPath };
+    }
+  });
+
   // Plus-ins/PSD2UI/generated/core/index.js
   var require_core = __commonJS({
     "Plus-ins/PSD2UI/generated/core/index.js"(exports, module) {
@@ -7311,7 +8047,8 @@
       var snapshot = require_snapshot();
       var nineSlice = require_nineSlice();
       var naming = require_naming();
-      module.exports = __spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues({}, commands), registry), validation), bundle), errors), structure), selection), snapshot), nineSlice), naming);
+      var documentIdentity = require_documentIdentity();
+      module.exports = __spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues(__spreadValues({}, commands), registry), validation), bundle), errors), structure), selection), snapshot), nineSlice), naming), documentIdentity);
     }
   });
 
@@ -7393,6 +8130,35 @@
       var NamespaceUri = "https://yoyoengine.dev/psd2ui/1.0/";
       var NamespacePrefix = "yoyoPsd2ui";
       var PropertyName = "Manifest";
+      var manifests = /* @__PURE__ */ new WeakMap();
+      function metadataRevision(document2) {
+        const core = photoshop().core;
+        return core && typeof core.getMetadataRevision === "function" ? core.getMetadataRevision(document2) : null;
+      }
+      function contentToken(document2) {
+        const core = photoshop().core;
+        return core && typeof core.getContentToken === "function" ? core.getContentToken(document2) : null;
+      }
+      function remember(document2, manifest, serialized) {
+        const revision = metadataRevision(document2);
+        if (revision != null) manifests.set(document2, {
+          path: document2.path,
+          revision,
+          serialized: serialized === void 0 ? JSON.stringify(manifest) : serialized
+        });
+      }
+      function assertManifestUnchanged(manifest, serialized) {
+        if (JSON.stringify(manifest) !== serialized) throw new Error("保存期间组件配置已变化，已停止发布保存结果，请重新保存。");
+      }
+      function receipt(document2, manifest, sidecarPath, serialized) {
+        assertManifestUnchanged(manifest, serialized);
+        remember(document2, manifest, serialized);
+        const result = { sidecarPath };
+        Object.defineProperty(result, "verifiedManifest", { get() {
+          return JSON.stringify(manifest) === serialized ? manifest : null;
+        } });
+        return result;
+      }
       function photoshop() {
         return require_photoshop();
       }
@@ -7429,12 +8195,19 @@
       }
       async function setDocumentXmp(rawXmp, document2) {
         const source = document2 || requireLocalDocument();
+        manifests.delete(source);
         await photoshop().invoke("setXmp", { documentID: source.id, rawXmp: String(rawXmp || "") });
       }
-      async function readManifest(document2) {
+      async function readManifest(document2, options) {
         const source = document2 || requireLocalDocument();
+        const revision = metadataRevision(source), cached = manifests.get(source);
+        if (!(options && options.fresh) && revision != null && cached && cached.path === source.path && cached.revision === revision) {
+          return JSON.parse(cached.serialized);
+        }
         const result = await photoshop().invoke("readManifest", { documentID: source.id, serialized: true });
-        return typeof result === "string" ? JSON.parse(result) : result || null;
+        const manifest = typeof result === "string" ? JSON.parse(result) : result || null;
+        if (revision === metadataRevision(source)) remember(source, manifest);
+        return manifest;
       }
       async function writeSidecar(manifest, document2) {
         const sidecarPath = getSidecarPath(document2);
@@ -7479,33 +8252,45 @@
       }
       async function writeManifestInCurrentModal(manifest, saveDocument) {
         const document2 = requireLocalDocument();
+        if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) throw new Error("组件配置必须是 JSON 对象。");
         const serializedManifest = JSON.stringify(manifest);
         assertActiveDocument(document2);
-        await photoshop().invoke("writeManifest", {
+        manifests.delete(document2);
+        const acknowledged = await photoshop().invoke("writeManifest", {
           documentID: document2.id,
           serializedManifest,
           namespaceUri: NamespaceUri,
           namespacePrefix: NamespacePrefix,
-          propertyName: PropertyName
+          propertyName: PropertyName,
+          validated: true
         });
         assertActiveDocument(document2);
-        const verified = await readManifest(document2);
-        if (JSON.stringify(verified) !== serializedManifest) {
-          throw new Error("PSD Manifest 写入后读回不一致，已停止保存文档。");
+        if (!acknowledged || acknowledged.verified !== true || String(acknowledged.documentId) !== String(document2.id) || acknowledged.serializedLength !== serializedManifest.length) {
+          const verified = await readManifest(document2, { fresh: true });
+          if (JSON.stringify(verified) !== serializedManifest) {
+            throw new Error("PSD Manifest 写入后读回不一致，已停止保存文档。");
+          }
         }
         assertActiveDocument(document2);
-        const sidecarPath = await writeSidecar(manifest, document2);
+        assertManifestUnchanged(manifest, serializedManifest);
+        const sidecarPath = await writeSidecar(JSON.parse(serializedManifest), document2);
         assertActiveDocument(document2);
         if (saveDocument !== false) await document2.save();
-        return { sidecarPath };
+        return receipt(document2, manifest, sidecarPath, serializedManifest);
       }
       async function writeManifest(manifest, saveDocument) {
         const document2 = requireLocalDocument();
+        const expectedToken = contentToken(document2);
+        const serializedManifest = JSON.stringify(manifest);
         const originalXmp = await getDocumentXmp(document2);
         assertActiveDocument(document2);
         const originalSidecar = await readSidecarRaw(document2);
         return photoshop().core.executeAsModal(async function() {
           assertActiveDocument(document2);
+          if (expectedToken != null && contentToken(document2) !== expectedToken) {
+            throw new Error("等待保存期间 PSD 图层已变化，已停止写入，请重新保存组件配置。");
+          }
+          assertManifestUnchanged(manifest, serializedManifest);
           let saveAttempted = false;
           try {
             const result = await writeManifestInCurrentModal(manifest, false);
@@ -7514,8 +8299,9 @@
               saveAttempted = true;
               await document2.save();
             }
-            return result;
+            return receipt(document2, manifest, result.sidecarPath, serializedManifest);
           } catch (error) {
+            manifests.delete(document2);
             const rollbackErrors = [];
             try {
               await setDocumentXmp(originalXmp, document2);
@@ -7548,7 +8334,7 @@
             }
             throw error;
           }
-        }, { commandName: "PSD2UI：保存文档配置与同目录镜像" });
+        }, { commandName: "PSD2UI：保存文档配置与同目录镜像", metadataOnly: true });
       }
       module.exports = {
         NamespaceUri,
@@ -7676,6 +8462,32 @@
       "use strict";
       var { app, core, action, constants } = require_photoshop();
       var { normalizeLayerTextEffects } = require_textEffects();
+      var projectionDocument = null;
+      var projectionRevision = null;
+      var layerProjections = /* @__PURE__ */ new WeakMap();
+      var documentProjections = /* @__PURE__ */ new WeakMap();
+      function projectionCache() {
+        if (typeof core.getLayerRevision === "function" && app.activeDocument) {
+          let cache = documentProjections.get(app.activeDocument);
+          if (!cache) {
+            cache = /* @__PURE__ */ new WeakMap();
+            documentProjections.set(app.activeDocument, cache);
+          }
+          return cache;
+        }
+        const revision = typeof core.getSnapshotRevision === "function" ? core.getSnapshotRevision() : null;
+        if (revision == null) {
+          projectionRevision = null;
+          layerProjections = /* @__PURE__ */ new WeakMap();
+          return null;
+        }
+        if (projectionDocument !== app.activeDocument || projectionRevision !== revision) {
+          projectionDocument = app.activeDocument;
+          projectionRevision = revision;
+          layerProjections = /* @__PURE__ */ new WeakMap();
+        }
+        return layerProjections;
+      }
       function asNumber(value) {
         if (value && typeof value === "object" && value.value != null) {
           return Number(value.value);
@@ -7811,7 +8623,7 @@
         const lineSpacing = effectiveSize > 0 && lineAdvance > 0 ? lineAdvance / effectiveSize : 1.2;
         return __spreadValues({
           fontSize: Number.isFinite(effectiveSize) && effectiveSize > 0 ? Math.max(1, Math.round(effectiveSize)) : 24,
-          lineSpacing: Math.max(0.1, lineSpacing)
+          lineSpacing: Math.max(1, lineSpacing)
         }, Number.isFinite(lineAdvance) && lineAdvance > 0 ? { lineAdvance } : {});
       }
       function readTextLayoutMode(layer, textDescriptor) {
@@ -7829,6 +8641,152 @@
         if (Array.isArray(shapes) && shapes.length > 0 && shapes.every((shape) => shape && shape.char && shape.char._enum === "char" && shape.char._value === "paint")) return "point";
         return void 0;
       }
+      function styleColorDescriptor(style) {
+        for (let depth = 0; style && depth < 16; depth += 1, style = style.baseParentStyle) {
+          if (Object.prototype.hasOwnProperty.call(style, "color")) return style.color;
+        }
+        return null;
+      }
+      function styleFontPostScriptName(style) {
+        for (let depth = 0; style && depth < 16; depth += 1, style = style.baseParentStyle) {
+          if (Object.prototype.hasOwnProperty.call(style, "fontPostScriptName")) {
+            const name = style.fontPostScriptName;
+            return typeof name === "string" && !/[\x00-\x1F]/.test(name) ? name.trim() : "";
+          }
+        }
+        return "";
+      }
+      function rgbStyleColor(style) {
+        const value = styleColorDescriptor(style);
+        if (!value || value._obj !== "RGBColor") return null;
+        const channels = [value.red, value.grain == null ? value.green : value.grain, value.blue].map(Number);
+        if (channels.some((channel) => !Number.isFinite(channel) || channel < 0 || channel > 255)) return null;
+        return "#".concat(channels.map((channel) => Math.round(channel).toString(16).padStart(2, "0")).join("").toUpperCase(), "FF");
+      }
+      function normalizedTextWithBoundaries(source) {
+        const boundaries = new Array(source.length + 1);
+        const output = [];
+        boundaries[0] = 0;
+        for (let index = 0; index < source.length; ) {
+          if (source[index] === "\r" && source[index + 1] === "\n") {
+            output.push("\n");
+            boundaries[index + 1] = null;
+            boundaries[index + 2] = output.length;
+            index += 2;
+          } else {
+            output.push(source[index] === "\r" ? "\n" : source[index]);
+            boundaries[++index] = output.length;
+          }
+        }
+        return { value: output.join(""), boundaries };
+      }
+      function splitsSurrogatePair(source, offset) {
+        return offset > 0 && offset < source.length && source.charCodeAt(offset - 1) >= 55296 && source.charCodeAt(offset - 1) <= 56319 && source.charCodeAt(offset) >= 56320 && source.charCodeAt(offset) <= 57343;
+      }
+      function activeFillEffect(layerEffects, descriptor) {
+        if (descriptor.layerFXVisible === false || !layerEffects) return false;
+        return ["gradientFill", "solidFill"].some((name) => {
+          const effects = [layerEffects[name], ...Array.isArray(layerEffects["".concat(name, "Multi")]) ? layerEffects["".concat(name, "Multi")] : []];
+          return effects.some((effect) => effect && effect.enabled !== false && effect.present !== false);
+        });
+      }
+      function readTextFontPostScriptName(textDescriptor, plainValue) {
+        if (!plainValue) return {};
+        const source = textDescriptor && textDescriptor.textKey;
+        const ranges = textDescriptor && textDescriptor.textStyleRange;
+        const skip = (reason) => ({ fontWarning: "未能确定文字层统一字体：".concat(reason, "；该文字层将使用项目默认字体。") });
+        if (typeof source !== "string" || !Array.isArray(ranges) || ranges.length === 0) {
+          return skip("Photoshop 未提供完整文字样式范围");
+        }
+        const normalized = normalizedTextWithBoundaries(source);
+        let displayEnd = source.length;
+        if (normalized.value !== plainValue) {
+          const terminalLength = source.endsWith("\r\n") ? 2 : source.endsWith("\r") ? 1 : 0;
+          const candidateEnd = source.length - terminalLength;
+          if (!terminalLength || normalized.value.slice(0, normalized.boundaries[candidateEnd]) !== plainValue) {
+            return skip("Photoshop 文字描述符与显示文本不一致");
+          }
+          displayEnd = candidateEnd;
+        }
+        const ordered = ranges.slice().sort((left, right) => Number(left.from) - Number(right.from));
+        const fonts = /* @__PURE__ */ new Set();
+        let cursor = 0;
+        for (let index = 0; index < ordered.length; index += 1) {
+          const range = ordered[index];
+          const from = Number(range && range.from);
+          const to = Number(range && range.to);
+          const last = index === ordered.length - 1;
+          if (!Number.isInteger(from) || !Number.isInteger(to) || from !== cursor || to <= from || to > source.length + (last ? 1 : 0)) return skip("样式范围索引不连续或越界");
+          const rawEnd = Math.min(to, source.length);
+          const start = Math.min(from, displayEnd);
+          const end = Math.min(rawEnd, displayEnd);
+          if (normalized.boundaries[start] == null || normalized.boundaries[end] == null || splitsSurrogatePair(source, start) || splitsSurrogatePair(source, end)) {
+            return skip("样式范围切开了换行或 Unicode 字符");
+          }
+          if (end > start) {
+            const font = styleFontPostScriptName(range.textStyle);
+            if (!font) return skip("可见文字缺少可继承的 PostScript 字体名");
+            fonts.add(font);
+          }
+          cursor = rawEnd;
+        }
+        if (cursor < displayEnd) return skip("样式范围没有覆盖完整文本");
+        if (fonts.size > 1) return skip("同一文字层使用了多个字体");
+        return fonts.size === 1 ? { fontPostScriptName: [...fonts][0] } : {};
+      }
+      function readTextRenderValue(textDescriptor, plainValue, layerEffects, descriptor) {
+        const source = textDescriptor && textDescriptor.textKey;
+        const ranges = textDescriptor && textDescriptor.textStyleRange;
+        if (typeof source !== "string" || !Array.isArray(ranges) || ranges.length < 2) return {};
+        const colors = ranges.map((range) => rgbStyleColor(range && range.textStyle));
+        const knownColors = new Set(colors.filter(Boolean));
+        const skip = (reason) => ({ renderWarning: "混色文字未生成 Unity 富文本：".concat(reason, "；请检查该文字层或拆成独立文字层。") });
+        if (knownColors.size === 0) {
+          const rawColors = new Set(ranges.map((range) => JSON.stringify(styleColorDescriptor(range && range.textStyle))));
+          return rawColors.size > 1 ? skip("逐字颜色不同，但没有可用的 RGB 字色") : {};
+        }
+        if (knownColors.size === 1 && colors.every(Boolean)) return {};
+        if (activeFillEffect(layerEffects, descriptor)) return skip("图层填充效果可能覆盖逐字颜色");
+        const normalized = normalizedTextWithBoundaries(source);
+        let displayEnd = source.length;
+        if (normalized.value !== plainValue) {
+          const terminalLength = source.endsWith("\r\n") ? 2 : source.endsWith("\r") ? 1 : 0;
+          const candidateEnd = source.length - terminalLength;
+          if (!terminalLength || normalized.value.slice(0, normalized.boundaries[candidateEnd]) !== plainValue) {
+            return skip("Photoshop 文字描述符与显示文本不一致");
+          }
+          displayEnd = candidateEnd;
+        }
+        if (source.includes("<")) return skip("原文包含可能被 Unity 识别为标签的 < 字符");
+        const ordered = ranges.slice().sort((left, right) => Number(left.from) - Number(right.from));
+        const segments = [];
+        let cursor = 0;
+        for (let index = 0; index < ordered.length; index += 1) {
+          const range = ordered[index];
+          const from = Number(range.from);
+          const to = Number(range.to);
+          const last = index === ordered.length - 1;
+          if (!Number.isInteger(from) || !Number.isInteger(to) || from !== cursor || to <= from || to > source.length + (last ? 1 : 0)) return skip("样式范围索引不连续或越界");
+          const rawEnd = Math.min(to, source.length);
+          const start = Math.min(from, displayEnd);
+          const end = Math.min(rawEnd, displayEnd);
+          if (normalized.boundaries[start] == null || normalized.boundaries[end] == null || splitsSurrogatePair(source, start) || splitsSurrogatePair(source, end)) {
+            return skip("样式范围切开了换行或 Unicode 字符");
+          }
+          const part = normalized.value.slice(normalized.boundaries[start], normalized.boundaries[end]);
+          if (part) {
+            const color = rgbStyleColor(range.textStyle);
+            if (!color) return skip("某一段缺少可继承的 RGB 字色");
+            const previous = segments[segments.length - 1];
+            if (previous && previous.color === color) previous.value += part;
+            else segments.push({ color, value: part });
+          }
+          cursor = rawEnd;
+        }
+        if (cursor < displayEnd) return skip("样式范围没有覆盖完整文本");
+        if (new Set(segments.map((segment) => segment.color)).size < 2) return {};
+        return { renderValue: segments.map((segment) => "<color=".concat(segment.color, ">").concat(segment.value, "</color>")).join("") };
+      }
       function readText(layer, layerEffects, textDescriptor, descriptor = {}) {
         if (layerKind(layer) !== "text") return null;
         const layoutMode = readTextLayoutMode(layer, textDescriptor);
@@ -7845,12 +8803,14 @@
             a: 1
           } : null;
           const metrics = readTextMetrics({ size: characterStyle.size || textItem.fontSize, leading: characterStyle.leading }, textDescriptor);
-          return __spreadProps(__spreadValues(__spreadValues({
-            value: String(textItem.contents || "").replace(/\r\n?/g, "\n"),
+          const value = String(textItem.contents || "").replace(/\r\n?/g, "\n");
+          return __spreadProps(__spreadValues(__spreadValues(__spreadProps(__spreadValues(__spreadValues({
+            value
+          }, readTextRenderValue(textDescriptor, value, layerEffects, descriptor)), readTextFontPostScriptName(textDescriptor, value)), {
             fontSize: metrics.fontSize,
             alignment: mapTextAlignment(paragraphStyle.justification),
             lineSpacing: metrics.lineSpacing
-          }, metrics.lineAdvance > 0 ? { lineAdvance: metrics.lineAdvance } : {}), layoutMode ? { layoutMode } : {}), {
+          }), metrics.lineAdvance > 0 ? { lineAdvance: metrics.lineAdvance } : {}), layoutMode ? { layoutMode } : {}), {
             color,
             effects: normalizeLayerTextEffects(layerEffects, descriptor)
           });
@@ -7887,10 +8847,27 @@
         });
       }
       function readLayer(layer) {
+        const cache = projectionCache();
+        const result = projectLayer(layer, cache);
+        return cache ? copyProjection(result) : result;
+      }
+      function copyProjection(value) {
+        if (!value || typeof value !== "object") return value;
+        if (Array.isArray(value)) return value.map(copyProjection);
+        const copy = {};
+        Object.keys(value).forEach((key) => {
+          copy[key] = copyProjection(value[key]);
+        });
+        return copy;
+      }
+      function projectLayer(layer, cache) {
+        const revision = typeof core.getLayerRevision === "function" ? core.getLayerRevision(layer) : projectionRevision;
+        const cached = cache && cache.get(layer);
+        if (revision != null && cached && cached.revision === revision) return cached.value;
         const children = [];
         const layers = layer.layers || [];
         for (let index = 0; index < layers.length; index += 1) {
-          children.push(readLayer(layers[index]));
+          children.push(projectLayer(layers[index], cache));
         }
         const opacity = Number(layer.opacity);
         const isText = layerKind(layer) === "text";
@@ -7909,13 +8886,14 @@
           styles: (textDescriptor.textStyleRange || []).map((range) => ({
             from: range.from,
             to: range.to,
-            fontPostScriptName: range.textStyle && range.textStyle.fontPostScriptName,
+            fontPostScriptName: styleFontPostScriptName(range.textStyle),
             fontAvailable: range.textStyle && range.textStyle.fontAvailable,
             size: range.textStyle && range.textStyle.size,
-            impliedFontSize: range.textStyle && range.textStyle.impliedFontSize
+            impliedFontSize: range.textStyle && range.textStyle.impliedFontSize,
+            color: rgbStyleColor(range.textStyle)
           }))
         } : null;
-        return {
+        const result = {
           layerId: String(layer.id),
           parentId: layer.parent && layer.parent.id != null ? String(layer.parent.id) : "",
           name: String(layer.name || "Layer-".concat(layer.id)),
@@ -7929,6 +8907,8 @@
           styleSignature: JSON.stringify({ base: readStyleSignature(layer), effects: effectsDescriptor, textSource }),
           children
         };
+        if (cache && revision != null) cache.set(layer, { revision, value: result });
+        return result;
       }
       function findLayerById(layers, layerId) {
         for (let index = 0; index < layers.length; index += 1) {
@@ -7951,8 +8931,8 @@
         if (selectedIds.size === 0) {
           throw new Error("请先选择一个或多个 Photoshop 图层。");
         }
-        const orderedLayers = [];
-        flattenLayers(document2.layers || [], orderedLayers);
+        const orderedLayers = selectedIds.size === 1 ? Array.from(document2.activeLayers) : [];
+        if (selectedIds.size > 1) flattenLayers(document2.layers || [], orderedLayers);
         return orderedLayers.filter((layer) => selectedIds.has(String(layer.id))).map((layer) => {
           const snapshot = readLayer(layer);
           return __spreadProps(__spreadValues({}, snapshot), {
@@ -7992,9 +8972,11 @@
       }
       function getDocumentInfo() {
         const document2 = requireDocument();
+        const path = String(document2.path);
+        const fileName = path.split(/[\\/]/).pop();
         return {
-          name: String(document2.title || "UI").replace(/\.psd$/i, ""),
-          path: String(document2.path),
+          name: String(fileName || document2.title || "UI").replace(/\.(psd|psb)$/i, ""),
+          path,
           width: asNumber(document2.width),
           height: asNumber(document2.height)
         };
@@ -8069,15 +9051,13 @@
           if (!findLayerById(document2.layers || [], id)) throw new Error("问题图层 ".concat(id, " 已不存在，请重新检查。"));
         });
         await core.executeAsModal(async () => {
-          for (let index = 0; index < ids.length; index += 1) {
-            await action.batchPlay([__spreadProps(__spreadValues({
-              _obj: "select",
-              _target: [{ _ref: "layer", _id: Number(ids[index]) }]
-            }, index > 0 ? { selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" } } : {}), {
-              makeVisible: false,
-              _options: { dialogOptions: "dontDisplay" }
-            })], {});
-          }
+          await action.batchPlay(ids.map((id, index) => __spreadProps(__spreadValues({
+            _obj: "select",
+            _target: [{ _ref: "layer", _id: Number(id) }]
+          }, index > 0 ? { selectionModifier: { _enum: "selectionModifierType", _value: "addToSelection" } } : {}), {
+            makeVisible: false,
+            _options: { dialogOptions: "dontDisplay" }
+          })), {});
         }, { commandName: "PSD2UI：定位图层" });
         return { layerIds: ids };
       }
@@ -9048,7 +10028,29 @@
           (key) => Number(left.sliceBorder && left.sliceBorder[key] || 0) === Number(right.sliceBorder && right.sliceBorder[key] || 0)
         );
       }
-      async function assertBundleOwnership(folder, bundle) {
+      var sliceBorderKeys = ["left", "top", "right", "bottom"];
+      function inheritedSliceRequested(resource) {
+        return resource.kind === "sprite" && resource.sliceBorder && sliceBorderKeys.every((key) => resource.sliceBorder[key] === 0);
+      }
+      function concreteSliceBorder(value) {
+        if (!value || typeof value !== "object") return null;
+        const border = {};
+        for (const key of sliceBorderKeys) {
+          if (!Number.isInteger(value[key]) || value[key] < 0) return null;
+          border[key] = value[key];
+        }
+        return sliceBorderKeys.some((key) => border[key] > 0) ? border : null;
+      }
+      function setBundleSliceBorder(bundle, resource, border) {
+        resource.sliceBorder = __spreadValues({}, border);
+        function visit(node) {
+          if (!node) return;
+          if (node.image && node.image.resourceId === resource.id) node.image.sliceBorder = __spreadValues({}, border);
+          (node.children || []).forEach(visit);
+        }
+        visit(bundle.root);
+      }
+      async function assertBundleOwnership(folder, bundle, inheritedResourceFiles = /* @__PURE__ */ new Map()) {
         assertBundleOutputNames(bundle);
         const jsonName = "".concat(bundle.document.name, ".psd2ui.json");
         const directories = {
@@ -9097,11 +10099,49 @@
           }
           records.push({ existing, entry, legacy, sameDocument });
         }
+        records.sort((left, right) => left.entry.nativePath.localeCompare(right.entry.nativePath));
         const checks = /* @__PURE__ */ new Map();
+        const warnings = [];
+        const inheritedFiles = new Map(inheritedResourceFiles);
         for (const resource of bundle.resources) {
           const target = await childFile(await relativeFolder(folder, resourceDirectory(resource)), resource.fileName);
           const comparisons = /* @__PURE__ */ new Map();
           let ownsTarget = false;
+          if (inheritedSliceRequested(resource)) {
+            let border = null;
+            let sourceFile = null;
+            for (const record of records) {
+              const prior = record.existing.resources.find((value) => value && value.kind === "sprite" && String(value.fileName).toLowerCase() === resource.fileName.toLowerCase());
+              if (!prior) continue;
+              const priorFile = await existingResourceFile(folder, prior, record.legacy);
+              if (!priorFile) continue;
+              const candidate = concreteSliceBorder(prior.sliceBorder);
+              if (!candidate) continue;
+              if (border && !sameResourceSettings({ kind: "sprite", sliceBorder: border }, prior)) {
+                throw resourceIssue(
+                  "PSD2UI_RESOURCE_SETTINGS_CONFLICT",
+                  "公共九宫 '".concat(resource.fileName, "' 的既有导出记录使用了不同边距，无法确定继承值。"),
+                  resource
+                );
+              }
+              border = candidate;
+              sourceFile = priorFile;
+            }
+            if (!border) throw resourceIssue(
+              "PSD2UI_SHARED_SLICE_INHERIT_UNAVAILABLE",
+              "九宫 '".concat(resource.fileName, "' 的四边均为 0，但当前 UIRes 没有可继承的同名 PNG 与有效九宫记录；首次交付请填写实际边距。"),
+              resource
+            );
+            setBundleSliceBorder(bundle, resource, border);
+            inheritedFiles.set(resource.id, target || sourceFile);
+            warnings.push({
+              severity: "warning",
+              code: "PSD2UI_SHARED_SLICE_INHERITED",
+              message: "公共九宫 '".concat(resource.fileName, "' 已沿用 UIRes 的边距 ").concat(border.left, "/").concat(border.top, "/").concat(border.right, "/").concat(border.bottom, " 和已有 PNG。"),
+              resourceId: resource.id,
+              sourceLayerId: resource.sourceLayerId
+            });
+          }
           for (const record of records) {
             const prior = record.existing.resources.find((value) => value && value.kind === resource.kind && String(value.fileName).toLowerCase() === resource.fileName.toLowerCase());
             if (!prior) continue;
@@ -9115,20 +10155,25 @@
               "公共图片 '".concat(resource.fileName, "' 与 '").concat(record.entry.name, "' 的九宫边框设置不同，无法共享同一 Unity 资源。"),
               resource
             );
-            if (!priorFile) throw resourceIssue(
-              "PSD2UI_SHARED_RESOURCE_MISSING",
-              "'".concat(record.entry.name, "' 引用的公共图片 '").concat(resource.fileName, "' 不存在，无法比较图片内容。"),
-              resource
-            );
+            if (!priorFile) {
+              warnings.push({
+                severity: "warning",
+                code: "PSD2UI_SHARED_RESOURCE_MISSING",
+                message: "'".concat(record.entry.name, "' 引用的公共图片 '").concat(resource.fileName, "' 已缺失；将使用当前可用图片继续导出。"),
+                resourceId: resource.id,
+                sourceLayerId: resource.sourceLayerId
+              });
+              continue;
+            }
             comparisons.set(priorFile.nativePath, { file: priorFile, owner: record.entry.name });
           }
-          if (target && (!ownsTarget || comparisons.size)) comparisons.set(
+          if (target && (inheritedFiles.has(resource.id) || !ownsTarget || comparisons.size)) comparisons.set(
             target.nativePath,
             comparisons.get(target.nativePath) || { file: target, owner: "已有输出图片" }
           );
           checks.set(resource.id, { comparisons: Array.from(comparisons.values()), target });
         }
-        return { checks, legacyJson, signature: JSON.stringify({
+        return { checks, legacyJson, warnings, inheritedFiles, signature: JSON.stringify({
           records: records.map((record) => [record.entry.nativePath, record.existing]).sort((a, b) => a[0].localeCompare(b[0])),
           targets: Array.from(checks, ([id, check]) => [
             id,
@@ -9142,33 +10187,66 @@
         assertBundleOutputNames(bundle);
         if (!sourceDocument) throw new Error("当前没有打开的 Photoshop 文档。");
         const referencedSources = /* @__PURE__ */ new Map();
+        const sourceNodes = /* @__PURE__ */ new Map();
+        const warnings = [];
         function visit(node) {
           if (!node) return;
           [node.image && node.image.resourceId, node.rawImage && node.rawImage.resourceId].filter(Boolean).forEach((id) => {
             if (!referencedSources.has(id)) referencedSources.set(id, /* @__PURE__ */ new Set());
             referencedSources.get(id).add(String(node.sourceLayerId));
+            sourceNodes.set(id + ":" + String(node.sourceLayerId), node);
           });
           (node.children || []).forEach(visit);
         }
         visit(bundle.root);
         for (const resource of bundle.resources) {
           const ids = bundle.schemaVersion === "1.5.0" ? resource.sourceLayerIds : [String(resource.sourceLayerId)];
+          if (resource.exportSourceLayerId != null && (bundle.schemaVersion !== "1.5.0" || resource.kind !== "sprite" || !resource.sliceBorder || resource.sourceLayerId !== resource.exportSourceLayerId || !ids.includes(resource.exportSourceLayerId))) {
+            throw resourceIssue("PSD2UI_SHARED_SLICE_SOURCE_INVALID", "共用九宫 '".concat(resource.fileName, "' 的指定源图无效。"), resource);
+          }
           if (bundle.schemaVersion === "1.5.0") {
             const expected = referencedSources.get(resource.id) || /* @__PURE__ */ new Set();
             if (expected.size !== ids.length || ids.some((id) => !expected.has(id))) {
-              throw new Error("[PSD2UI_RESOURCE_SOURCES_INVALID] '".concat(resource.fileName, "' 的像素校验来源与节点引用不一致。"));
+              throw new Error("[PSD2UI_RESOURCE_SOURCES_INVALID] '".concat(resource.fileName, "' 的资源来源与节点引用不一致。"));
             }
           }
+          let expectedSize = null;
           ids.forEach((id) => {
             const layer = findLayerById(sourceDocument.layers || [], id);
             if (!layer) throw new Error("[PSD2UI_RESOURCE_SOURCE_MISSING] 资源 '".concat(resource.fileName, "' 的源图层 ").concat(id, " 不存在。"));
             if (bundle.schemaVersion === "1.5.0" && parseResourceLayerName(layer.name, id).fileName !== resource.fileName) {
               throw new Error("[PSD2UI_SOURCE_NAME_CHANGED] 图片图层 ".concat(id, " '").concat(layer.name, "' 已变更，请重新检查后导出。"));
             }
+            if (resource.exportSourceLayerId != null) return;
+            const node = sourceNodes.get(resource.id + ":" + id);
+            const width = node && node.rect ? Number(node.rect.width) : asNumber(layer.bounds.right) - asNumber(layer.bounds.left);
+            const height = node && node.rect ? Number(node.rect.height) : asNumber(layer.bounds.bottom) - asNumber(layer.bounds.top);
+            const size = resource.sliceBorder ? {
+              width: Number(resource.sliceBorder.left) + 1 + Number(resource.sliceBorder.right),
+              height: Number(resource.sliceBorder.top) + 1 + Number(resource.sliceBorder.bottom)
+            } : { width, height };
+            if (![size.width, size.height].every((value) => Number.isFinite(value) && value > 0)) {
+              throw resourceIssue("PSD2UI_RESOURCE_SIZE_INVALID", "图片 '".concat(resource.fileName, "' 的图层 ").concat(id, " 缺少有效宽高。"), resource);
+            }
+            if (expectedSize && (size.width !== expectedSize.width || size.height !== expectedSize.height)) {
+              warnings.push({
+                severity: "warning",
+                code: "PSD2UI_RESOURCE_SIZE_REUSED",
+                message: "同名图片 '".concat(resource.fileName, "' 的图层 ").concat(expectedSize.layerId, " 为 ").concat(expectedSize.width, "×").concat(expectedSize.height, "，") + "图层 ".concat(id, " 为 ").concat(size.width, "×").concat(size.height, "；共用一张 PNG，各节点保留自己的布局尺寸。") + (size.width * expectedSize.height === size.height * expectedSize.width ? "" : "宽高比不同，请核对显示效果。"),
+                resourceId: resource.id,
+                sourceLayerId: id
+              });
+            }
+            if (!expectedSize) expectedSize = __spreadProps(__spreadValues({}, size), { layerId: id });
           });
         }
-        await assertBundleOwnership(folder, bundle);
-        return { status: "ready", resourceCount: bundle.resources.length };
+        const ownership = await assertBundleOwnership(folder, bundle);
+        return {
+          status: "ready",
+          resourceCount: bundle.resources.length,
+          warnings: warnings.concat(ownership.warnings),
+          inheritedFiles: ownership.inheritedFiles
+        };
       }
       async function closeWithoutSaving(document2) {
         if (!document2) return;
@@ -9321,7 +10399,14 @@
         }
         return true;
       }
-      async function readPngPixels(file) {
+      async function readPngSize(file) {
+        if (typeof core.readPngSize === "function") {
+          const size = await core.readPngSize(file);
+          if (!size || ![size.width, size.height].every((value) => Number.isInteger(value) && value > 0)) {
+            throw new Error("[PSD2UI_PNG_SIZE_INVALID] PNG 宽高读回无效。");
+          }
+          return { width: size.width, height: size.height };
+        }
         const previous = app.activeDocument;
         const openIds = new Set(Array.from(app.documents || []).map((document2) => String(document2.id)));
         let opened;
@@ -9329,7 +10414,7 @@
           await app.open(file);
           opened = app.activeDocument;
           if (!opened || openIds.has(String(opened.id))) throw new Error("读取 PNG 时未创建独立临时文档。");
-          return await capturePixels(opened);
+          return { width: Math.round(asNumber(opened.width)), height: Math.round(asNumber(opened.height)) };
         } finally {
           if (opened && !openIds.has(String(opened.id))) await closeWithoutSaving(opened);
           if (previous && findOpenDocument(previous.id)) app.activeDocument = previous;
@@ -9339,6 +10424,15 @@
         let sourceDocument = requireOpenDocument(sourceDocumentId, "资源源");
         let layer = findLayerById(sourceDocument.layers || [], sourceLayerId);
         if (!layer) throw new Error("资源源图层 ".concat(sourceLayerId, " 不存在。"));
+        if (!sliceBorder && !verifyPixels && typeof core.exportLayerPng === "function") {
+          await core.exportLayerPng({
+            documentId: sourceDocument.id,
+            layerId: layer.id,
+            path: outputFile.nativePath,
+            compression: 6
+          });
+          return null;
+        }
         const sourceWidth = asNumber(sourceDocument.width);
         const sourceHeight = asNumber(sourceDocument.height);
         const sourceBounds = layer.bounds;
@@ -9357,6 +10451,7 @@
           const placement = constants.ElementPlacement ? constants.ElementPlacement.PLACEATBEGINNING : void 0;
           const copied = placement == null ? await layer.duplicate(requireOpenDocument(workbenchId, "资源工作台")) : await layer.duplicate(requireOpenDocument(workbenchId, "资源工作台"), placement);
           copied.visible = true;
+          if (Number(copied.opacity) !== 100) copied.opacity = 100;
           app.activeDocument = requireOpenDocument(workbenchId, "资源工作台");
           await copied.translate(-asNumber(sourceBounds.left), -asNumber(sourceBounds.top));
           const liveWorkbench = requireOpenDocument(workbenchId, "资源工作台");
@@ -9505,9 +10600,11 @@
       async function writeBundleUnlocked(bundle, options) {
         const sourceDocument = app.activeDocument;
         if (!sourceDocument) throw new Error("当前没有打开的 Photoshop 文档。");
+        const sourceCheckpoint = typeof core.getExportSourceCheckpoint === "function" ? core.getExportSourceCheckpoint(sourceDocument.id) : null;
         const sourceDocumentPath = String(sourceDocument.path || "");
         const folder = await resolveUiResFolder(options);
-        await preflightExport(folder, bundle, sourceDocument);
+        const preflight = await preflightExport(folder, bundle, sourceDocument);
+        const warnings = preflight.warnings;
         const temporaryRoot = await storage.localFileSystem.getTemporaryFolder();
         const transactionFolder = await temporaryRoot.createFolder("psd2ui-export-".concat(Date.now(), "-").concat(Math.random().toString(36).slice(2)));
         const stage = await transactionFolder.createFolder("staged");
@@ -9515,6 +10612,7 @@
         const files = [];
         const stagedResources = /* @__PURE__ */ new Map();
         let reusedResourceCount = 0;
+        const sourceReuse = [];
         let checkedOwnership;
         const checkedFiles = /* @__PURE__ */ new Map();
         let preserveBackup = false;
@@ -9529,24 +10627,27 @@
             await core.executeAsModal(async () => {
               for (let index = 0; index < bundle.resources.length; index += 1) {
                 const resource = bundle.resources[index];
-                const sourceIds = bundle.schemaVersion === "1.5.0" ? resource.sourceLayerIds : [String(resource.sourceLayerId)];
-                let referencePixels = null;
-                for (let candidateIndex = 0; candidateIndex < sourceIds.length; candidateIndex += 1) {
-                  const liveSourceDocument = requireOpenDocument(sourceDocumentId, "导出源");
-                  const layer = findLayerById(liveSourceDocument.layers || [], sourceIds[candidateIndex]);
-                  if (!layer) throw new Error("资源 ".concat(resource.fileName, " 的源图层 ").concat(sourceIds[candidateIndex], " 不存在。"));
-                  const file = await stage.createFile(candidateIndex === 0 ? resource.fileName : "verify-".concat(index, "-").concat(candidateIndex, ".png"), { overwrite: false });
-                  await exportResourcePng(sourceDocumentId, String(layer.id), file, resource.sliceBorder, false);
-                  const pixels = sourceIds.length > 1 ? await readPngPixels(file) : null;
-                  if (candidateIndex === 0) {
-                    referencePixels = pixels;
-                    stagedResources.set(resource.id, file);
-                  } else if (!pixelsEqual(referencePixels, pixels)) {
-                    throw resourceIssue("PSD2UI_RESOURCE_CONTENT_CONFLICT", "同名图片 '".concat(resource.fileName, "' 的实际像素不同：") + "图层 ".concat(sourceIds[0], " 与 ").concat(sourceIds[candidateIndex], "。输出目录尚未写入。"), resource);
-                  }
+                const inheritedFile = preflight.inheritedFiles.get(resource.id);
+                if (inheritedFile) {
+                  stagedResources.set(resource.id, await inheritedFile.copyTo(stage, { overwrite: false }));
+                  continue;
                 }
+                const representativeId = String(resource.exportSourceLayerId == null ? resource.sourceLayerId : resource.exportSourceLayerId);
+                const liveSourceDocument = requireOpenDocument(sourceDocumentId, "导出源");
+                const layer = findLayerById(liveSourceDocument.layers || [], representativeId);
+                if (!layer) throw new Error("资源 ".concat(resource.fileName, " 的源图层 ").concat(representativeId, " 不存在。"));
+                const file = await stage.createFile(resource.fileName, { overwrite: false });
+                await exportResourcePng(sourceDocumentId, representativeId, file, resource.sliceBorder, false);
+                stagedResources.set(resource.id, file);
+                const reusedLayerIds = (resource.sourceLayerIds || []).filter((id) => String(id) !== representativeId);
+                if (reusedLayerIds.length) sourceReuse.push({
+                  resourceId: resource.id,
+                  fileName: resource.fileName,
+                  sourceLayerId: representativeId,
+                  reusedLayerIds
+                });
               }
-              const ownership = await assertBundleOwnership(folder, bundle);
+              const ownership = await assertBundleOwnership(folder, bundle, preflight.inheritedFiles);
               checkedOwnership = ownership.signature;
               for (let index = 0; index < bundle.resources.length; index += 1) {
                 const resource = bundle.resources[index];
@@ -9556,7 +10657,7 @@
                   file: check.target,
                   bytes: await check.target.read({ format: storage.formats.binary })
                 });
-                const reference = check.comparisons.length ? await readPngPixels(file) : null;
+                const reference = check.comparisons.length ? await readPngSize(file) : null;
                 let equalFile = null;
                 for (let candidateIndex = 0; candidateIndex < check.comparisons.length; candidateIndex += 1) {
                   const comparison = check.comparisons[candidateIndex];
@@ -9566,17 +10667,35 @@
                     file: comparison.file,
                     bytes: await copy.read({ format: storage.formats.binary })
                   });
-                  if (!pixelsEqual(reference, await readPngPixels(copy))) throw resourceIssue(
-                    "PSD2UI_RESOURCE_CONTENT_CONFLICT",
-                    "公共图片 '".concat(resource.fileName, "' 与 '").concat(comparison.owner, "' 的现有 PNG 尺寸或像素不同。") + "当前来源图层：".concat(resource.sourceLayerIds || resource.sourceLayerId, "；已有图片：").concat(comparison.file.nativePath, "。输出目录尚未写入。"),
-                    resource
-                  );
-                  equalFile = copy;
+                  const size = await readPngSize(copy);
+                  if (reference.width !== size.width || reference.height !== size.height) {
+                    warnings.push({
+                      severity: "warning",
+                      code: "PSD2UI_RESOURCE_SIZE_REUSED",
+                      message: "公共图片 '".concat(resource.fileName, "' 的当前导出尺寸 ").concat(reference.width, "×").concat(reference.height, " 与已有 PNG ") + "".concat(size.width, "×").concat(size.height, " 不同；保留已有图片 ").concat(comparison.file.nativePath, "，各节点使用自己的布局尺寸。") + (reference.width * size.height === reference.height * size.width ? "" : "宽高比不同，请核对显示效果。"),
+                      resourceId: resource.id,
+                      sourceLayerId: resource.sourceLayerId
+                    });
+                  }
+                  if (!equalFile) equalFile = copy;
+                  let reuse = sourceReuse.find((entry) => entry.resourceId === resource.id);
+                  if (!reuse) {
+                    reuse = { resourceId: resource.id, fileName: resource.fileName, sourceLayerId: String(resource.sourceLayerId), reusedLayerIds: [] };
+                    sourceReuse.push(reuse);
+                  }
+                  reuse.existingFile = check.target ? check.target.nativePath : comparison.file.nativePath;
                 }
                 if (equalFile) {
                   reusedResourceCount += 1;
                   if (check.target) continue;
                   file = equalFile;
+                }
+                if (check.target && (sameBytes(
+                  await file.read({ format: storage.formats.binary }),
+                  await check.target.read({ format: storage.formats.binary })
+                ) || typeof core.samePngContent === "function" && await core.samePngContent(file, check.target))) {
+                  reusedResourceCount += 1;
+                  continue;
                 }
                 files.push({ file, directory: resourceDirectory(resource) });
               }
@@ -9590,7 +10709,16 @@
             );
             if (sourceDocumentPath) await openLocalDocument(sourceDocumentPath);
           }
-          if ((await assertBundleOwnership(folder, bundle)).signature !== checkedOwnership) {
+          const jsonFile = await stage.createFile("".concat(bundle.document.name, ".psd2ui.json"), { overwrite: false });
+          const jsonText = JSON.stringify(bundle, null, 2);
+          await jsonFile.write(jsonText, { format: storage.formats.utf8 });
+          const priorJson = await childFile(await childFolder(folder, "json"), jsonFile.name);
+          const priorJsonText = priorJson && await priorJson.read({ format: storage.formats.utf8 });
+          if (priorJson) checkedFiles.set(priorJson.nativePath, {
+            file: priorJson,
+            bytes: await priorJson.read({ format: storage.formats.binary })
+          });
+          if ((await assertBundleOwnership(folder, bundle, preflight.inheritedFiles)).signature !== checkedOwnership) {
             throw new Error("[PSD2UI_EXPORT_TARGET_CHANGED] 比较期间输出目录的资源声明发生变化，请重新预检。");
           }
           for (const { file, bytes } of checkedFiles.values()) {
@@ -9598,19 +10726,32 @@
               throw new Error("[PSD2UI_EXPORT_TARGET_CHANGED] 比较期间 '".concat(file.nativePath, "' 已被修改，请重新预检。"));
             }
           }
-          if (options && options.checkOnly) return { status: "ready", resourceCount: bundle.resources.length, reusedResourceCount };
-          const jsonFile = await stage.createFile("".concat(bundle.document.name, ".psd2ui.json"), { overwrite: false });
-          await jsonFile.write(JSON.stringify(bundle, null, 2), { format: storage.formats.utf8 });
-          files.push({ file: jsonFile, directory: "json" });
-          await commitStagedFiles(folder, files, backup, ["sprite", "texture", "json"]);
+          if (sourceCheckpoint != null) await core.verifyExportSourceCheckpoint(sourceDocument.id, sourceCheckpoint);
+          if (options && options.checkOnly) return {
+            status: "ready",
+            resourceCount: bundle.resources.length,
+            reusedResourceCount,
+            sourceReuse,
+            warnings
+          };
+          if (!priorJson || priorJsonText !== jsonText) {
+            files.push({ file: jsonFile, directory: "json" });
+          }
+          if (files.length) await commitStagedFiles(folder, files, backup, ["sprite", "texture", "json"]);
           return {
             folder: folder.nativePath,
             json: "".concat(folder.nativePath.replace(/[\\/]+$/, ""), "/json/").concat(jsonFile.name),
             resourceCount: bundle.resources.length,
-            reusedResourceCount
+            reusedResourceCount,
+            sourceReuse,
+            warnings
           };
         } catch (error) {
-          preserveBackup = Boolean(error.preserveExportBackup);
+          preserveBackup = Boolean(error.preserveExportBackup) || error.code === "CEP_HOST_RESULT_UNKNOWN";
+          if (error.code === "CEP_HOST_RESULT_UNKNOWN") {
+            error.exportTransactionPath = transactionFolder.nativePath;
+            error.message += "\n导出结果待确认，暂存目录已保留：".concat(transactionFolder.nativePath);
+          }
           throw error;
         } finally {
           if (!preserveBackup) {
@@ -9660,7 +10801,7 @@
         getActiveLayersInfo,
         getDocumentInfo,
         addSelectionChangeListener,
-        createSnapshot,
+        createSnapshot: readSnapshot,
         structureActiveLayers,
         validateGroupSelection,
         selectLayersById,
@@ -9708,9 +10849,37 @@
       var moduleInputDocumentKey = "";
       var moduleInputDirty = false;
       var authoringStateCache = /* @__PURE__ */ new Map();
+      var pendingDocumentIdentities = /* @__PURE__ */ new Map();
+      var operationSnapshots = null;
+      function createSnapshot(rootLayerId, snapshots = operationSnapshots) {
+        const revision = typeof photoshopCore.getSnapshotRevision === "function" ? photoshopCore.getSnapshotRevision() : null;
+        if (!snapshots) return readSnapshot(rootLayerId);
+        if (revision == null) {
+          snapshots.clear();
+          return readSnapshot(rootLayerId);
+        }
+        const key = "".concat(documentKey(), "|").concat(rootLayerId, "|").concat(revision);
+        if (!snapshots.has(key)) snapshots.set(key, readSnapshot(rootLayerId));
+        return snapshots.get(key);
+      }
       function documentKey() {
         const document2 = requireDocument();
         return "".concat(String(document2.id), "|").concat(getDocumentInfo().path);
+      }
+      function bindCurrentDocumentIdentity(manifest, info = getDocumentInfo()) {
+        const source = manifest.document;
+        const key = "".concat(Psd2Ui.normalizeDocumentPath(info.path), "|").concat(source.id, "|").concat(source.sourcePath || "", "|").concat(source.name);
+        const pendingId = pendingDocumentIdentities.get(key);
+        const bound = Psd2Ui.bindDocumentIdentity(
+          manifest,
+          info,
+          pendingId ? { idFactory: () => pendingId } : void 0
+        );
+        if (bound.copied && !pendingId) {
+          pendingDocumentIdentities.set(key, bound.manifest.document.id);
+          if (pendingDocumentIdentities.size > 8) pendingDocumentIdentities.delete(pendingDocumentIdentities.keys().next().value);
+        }
+        return bound.manifest;
       }
       function selectionKey() {
         try {
@@ -9718,6 +10887,26 @@
         } catch (error) {
           return "";
         }
+      }
+      function selectedNativeLayers() {
+        const document2 = requireDocument();
+        const selected = Array.from(document2.activeLayers || []);
+        if (!selected.length) throw new Error("请先选择一个或多个 Photoshop 图层。");
+        if (selected.length === 1) return selected;
+        const ids = new Set(selected.map((layer) => String(layer.id)));
+        const ordered = [];
+        function visit(layers) {
+          Array.from(layers || []).forEach((layer) => {
+            if (ids.has(String(layer.id))) ordered.push(layer);
+            visit(layer.layers);
+          });
+        }
+        visit(document2.layers);
+        return ordered;
+      }
+      function isNativeGroupLayer(layer) {
+        const kind = String(layer && layer.kind || "").toLowerCase();
+        return !kind.includes("text") && (Psd2Ui.isGroupLayer(layer) || Boolean(layer && layer.layers && layer.layers.length));
       }
       function isCurrentRefresh(version, selection) {
         if (version !== authoringRefreshVersion) return false;
@@ -9736,7 +10925,7 @@
         if (visible) target.classList.remove("is-hidden");
         else target.classList.add("is-hidden");
       }
-      async function ensureAuthoringManifest() {
+      async function ensureAuthoringManifest(snapshotReader = createSnapshot) {
         const info = getDocumentInfo();
         const liveDocument = requireDocument();
         const key = "".concat(String(liveDocument.id), "|").concat(info.path);
@@ -9744,18 +10933,20 @@
         requireSameDocument(key);
         savedDocumentKey = stored ? key : "";
         const current = stored || (draftDocumentKey === key ? draftManifest : null);
-        if (current) return Psd2Ui.projectAutomaticImageSemantics(
-          __spreadProps(__spreadValues({}, current), { resourceNaming: "source" }),
-          createSnapshot(current.document.rootLayerId)
+        const bound = current && bindCurrentDocumentIdentity(current, info);
+        if (bound) return Psd2Ui.projectAutomaticImageSemantics(
+          __spreadProps(__spreadValues({}, bound), { resourceNaming: "source" }),
+          snapshotReader(bound.document.rootLayerId)
         );
         const rootLayerId = "document-root";
-        const snapshot = createSnapshot(rootLayerId);
+        const snapshot = snapshotReader(rootLayerId);
         draftManifest = Psd2Ui.executeAuthoringCommand(null, {
           command: "initialize-document",
           input: {
             module: "document",
             resourceNaming: "source",
             name: info.name,
+            sourcePath: info.path,
             width: info.width,
             height: info.height,
             rootLayerId,
@@ -9792,7 +10983,7 @@
         element("start-components").disabled = !info || !manifest;
         showElement("prepare-reminder", !ready);
         const layers = info ? Array.from(requireDocument().layers || []) : [];
-        const grouped = layers.length === 1 && Psd2Ui.isGroupLayer(readLayer(layers[0]));
+        const grouped = layers.length === 1 && isNativeGroupLayer(layers[0]);
         element("wrap-document-root").disabled = !manifest || !layers.length || grouped;
         element("wrap-document-root").textContent = grouped ? "已有一个根组" : "将全部图层放入根组";
         element("root-group-summary").textContent = grouped ? "全部图层已在「".concat(layers[0].name, "」中，无需再次套组。") : layers.length ? "将收进全部 ".concat(layers.length, " 个顶层图层和组。") : "打开 PSD 后读取图层。";
@@ -9903,16 +11094,17 @@
       }
       async function run(label, callback, options) {
         if (operationRunning) return null;
+        const started = Date.now();
         operationRunning = true;
         authoringRefreshVersion += 1;
-        authoringStateCache.clear();
+        operationSnapshots = /* @__PURE__ */ new Map();
         try {
           if (globalThis.__PSD2UI_REFRESH_HOST__) await globalThis.__PSD2UI_REFRESH_HOST__();
           if (!options || options.keepVisualPreview !== true) await restoreVisualStatePreview();
           writeStatus("".concat(label, "：执行中……"), "".concat(label, "：执行中"));
           const result = await callback();
           refreshContext();
-          await refreshAuthoringState();
+          await refreshAuthoringState({ reuseDocument: true });
           writeStatus({ operation: label, success: true, result }, "".concat(label, "成功"));
           return result;
         } catch (error) {
@@ -9929,40 +11121,78 @@
           console.error(error);
           return null;
         } finally {
+          if (typeof photoshopCore.recordPerformance === "function") photoshopCore.recordPerformance("panel:" + label, Date.now() - started);
+          operationSnapshots = null;
           operationRunning = false;
         }
       }
-      function captureBaseline(manifest, context) {
+      function captureBaseline(manifest, context, preparedSnapshot) {
         if (!manifest || !manifest.document || !manifest.document.rootLayerId) return manifest;
-        const snapshot = createSnapshot(manifest.document.rootLayerId);
+        const snapshot = preparedSnapshot || createSnapshot(manifest.document.rootLayerId);
         return Psd2Ui.executeAuthoringCommand(
           manifest,
           { command: "capture-baseline", input: { snapshot } },
           context || HumanContext
         ).manifest;
       }
-      async function persistManifest(manifest, writer, context) {
+      async function persistManifest(manifest, writer, context, preparedSnapshot) {
         const key = documentKey();
-        const snapshot = createSnapshot(manifest.document.rootLayerId);
+        manifest = bindCurrentDocumentIdentity(manifest);
+        const snapshot = preparedSnapshot || createSnapshot(manifest.document.rootLayerId);
         const synchronized = Psd2Ui.executeAuthoringCommand(manifest, {
           command: "sync-layer-tree",
           input: { snapshot }
         }, context || HumanContext);
-        const persisted = captureBaseline(synchronized.manifest, context);
+        const persisted = captureBaseline(synchronized.manifest, context, snapshot);
         const writeResult = await (writer || writeManifest)(persisted, true);
         requireSameDocument(key);
-        const readback = await readManifest();
-        requireSameDocument(key);
-        assertJsonEqual(readback, persisted, "保存后的组件配置");
+        if (!writeResult || writeResult.verifiedManifest !== persisted) {
+          const readback = await readManifest();
+          requireSameDocument(key);
+          assertJsonEqual(readback, persisted, "保存后的组件配置");
+        }
         savedDocumentKey = key;
         draftManifest = persisted;
         draftDocumentKey = key;
+        const revision = typeof photoshopCore.getDocumentRevision === "function" ? photoshopCore.getDocumentRevision() : null;
+        if (revision != null) authoringStateCache.set(key, {
+          revision,
+          manifest: persisted,
+          savedDocumentKey: key,
+          sidecarLabel: "".concat(writeResult.sidecarPath, " · revision ").concat(persisted.revision || 0),
+          changeLabel: "整个界面根与上次保存一致。"
+        });
         return {
           manifest: persisted,
           writeResult,
           diagnostics: synchronized.value.diagnostics,
           reconciliation: synchronized.value.reconciliation
         };
+      }
+      function exportManifestSignature(manifest) {
+        const comparable = JSON.parse(JSON.stringify(manifest));
+        delete comparable.revision;
+        if (comparable.baseline) {
+          delete comparable.baseline.revision;
+          delete comparable.baseline.capturedAt;
+        }
+        return JSON.stringify(comparable);
+      }
+      async function persistExportManifest(prepared, context) {
+        const current = await readManifest();
+        const sidecar = current && await readSidecarManifest();
+        if (current && sidecar && sidecar.manifest && JSON.stringify(current) === JSON.stringify(sidecar.manifest) && requireDocument().saved === true) {
+          const bound = bindCurrentDocumentIdentity(prepared.manifest);
+          const synchronized = Psd2Ui.prepareManifestForExport(bound, prepared.snapshot, { allocateResources: false }).manifest;
+          const candidate = Psd2Ui.captureBaseline(synchronized, prepared.snapshot);
+          if (exportManifestSignature(current) === exportManifestSignature(candidate)) {
+            savedDocumentKey = documentKey();
+            draftManifest = current;
+            draftDocumentKey = savedDocumentKey;
+            return { manifest: current, writeResult: { sidecarPath: sidecar.path } };
+          }
+        }
+        return persistManifest(prepared.manifest, null, context, prepared.snapshot);
       }
       async function restoreManifestPersistence(document2, backup) {
         return photoshopCore.executeAsModal(async () => {
@@ -10037,7 +11267,7 @@
       function handlePanelChanged(panelName) {
         element("current-layer").title = element("current-layer").textContent;
         refreshContext();
-        refreshAuthoringState().catch((error) => console.error("刷新 PSD2UI 配置状态失败。", error));
+        refreshAuthoringState({ reuseDocument: true }).catch((error) => console.error("刷新 PSD2UI 配置状态失败。", error));
       }
       function setAdvancedResourceVisible(visible) {
         PanelShell.setAdvancedResourceVisible(visible);
@@ -10060,6 +11290,7 @@
       function resetImageDefaults() {
         element("image-type").value = "simple";
         showElement("slice-fields", false);
+        showElement("shared-slice-panel", false);
         element("slice-left").value = "0";
         element("slice-top").value = "0";
         element("slice-right").value = "0";
@@ -10129,6 +11360,14 @@
         if (semantic === "view") return "界面根 / View";
         if (semantic === "group") return "普通容器 / Group";
         return semantic || "尚未解析";
+      }
+      function hasDeferredGeometry() {
+        return typeof photoshopCore.hasDeferredSnapshot === "function" && photoshopCore.hasDeferredSnapshot();
+      }
+      function displayedLayerChanges(manifest, layer, deferredGeometry) {
+        const deferred = deferredGeometry && Psd2Ui.normalizeLayerKind(layer) === "group";
+        const changes = Psd2Ui.diffLayerFromBaseline(manifest, layer);
+        return { deferred, changes: deferred ? changes.filter((change) => change !== "位置或尺寸已改变" && change !== "图层样式已改变") : changes };
       }
       function clearChildren(target) {
         while (target && target.firstChild) target.removeChild(target.firstChild);
@@ -10607,7 +11846,8 @@
             const bounds = group.bounds || {};
             const width = Math.max(0, Number(bounds.right || 0) - Number(bounds.left || 0));
             const height = Math.max(0, Number(bounds.bottom || 0) - Number(bounds.top || 0));
-            structureRootSummary.textContent = "".concat(group.name, " · ").concat(Psd2Ui.summarizeSelection(group.children || []), " · ").concat(width, " × ").concat(height, " px");
+            const size = hasDeferredGeometry() ? "尺寸待核对" : "".concat(width, " × ").concat(height, " px");
+            structureRootSummary.textContent = "".concat(group.name, " · ").concat(Psd2Ui.summarizeSelection(group.children || []), " · ").concat(size);
           }
         }
         const savedComponent = authoredLayers.length === 1 && authoredLayers[0].structure ? authoredLayers[0] : null;
@@ -10651,17 +11891,57 @@
           sidecarPath: persisted.writeResult.sidecarPath
         };
       }
+      function sharedSliceResource(manifest, layer) {
+        const registry = manifest && manifest.resourceRegistry;
+        if (!registry || !layer) return null;
+        const id = registry.layerBindings && registry.layerBindings[String(layer.id)];
+        return registry.resources && registry.resources[id] || null;
+      }
+      function renderSharedSlice(manifest, selected) {
+        const layer = selected.length === 1 ? selected[0] : null;
+        const node = layer && manifest.nodes[String(layer.id)];
+        const resource = sharedSliceResource(manifest, layer);
+        const sourceId = resource && resource.exportSourceLayerId;
+        const visible = manifest.resourceNaming === "source" && node && node.image && (node.image.imageType === "sliced" || sourceId);
+        showElement("shared-slice-panel", Boolean(visible));
+        if (!visible) return;
+        const members = Object.keys(manifest.nodes).filter((id) => {
+          const other = manifest.nodes[id];
+          return other.image && Psd2Ui.stripLegacyLayerSuffix(other.name) === Psd2Ui.stripLegacyLayerSuffix(node.name);
+        });
+        const source = sourceId && manifest.nodes[sourceId];
+        element("shared-slice-status").textContent = sourceId ? "共用源图：".concat(source ? source.name : "源图已缺失，请重新指定", "（图层 ").concat(sourceId, "）；同名图片 ").concat(members.length, " 处。") : "尚未指定共用源图；同名图片 ".concat(members.length, " 处（图层 ").concat(members.join("、"), "）。");
+        element("shared-slice-locate").disabled = !source;
+        element("shared-slice-clear").disabled = !sourceId;
+        if (source && source.image && source.image.sliceBorder && String(layer.id) !== sourceId) {
+          const border = source.image.sliceBorder;
+          element("shared-slice-status").textContent += " 实际导出边距（左/上/右/下）：".concat(border.left, "/").concat(border.top, "/").concat(border.right, "/").concat(border.bottom, "；下方输入保留本层配置，更换源图后生效。");
+        }
+      }
+      async function setSharedSliceSource(clear) {
+        const key = documentKey();
+        const layer = requireSingleSelection("指定共用九宫源图");
+        const manifest = await ensureAuthoringManifest();
+        requireSameDocument(key);
+        requireLayersInAuthoringRoot(manifest, [layer]);
+        const result = Psd2Ui.executeAuthoringCommand(manifest, {
+          command: "set-shared-nine-slice-source",
+          input: { layerId: layer.id, clear, snapshot: createSnapshot(manifest.document.rootLayerId) }
+        }, HumanContext);
+        const persisted = await persistManifest(result.manifest);
+        return {
+          fileName: result.value.fileName,
+          exportSourceLayerId: result.value.exportSourceLayerId || null,
+          sidecarPath: persisted.writeResult.sidecarPath
+        };
+      }
       async function structureSelectedComponent() {
         const key = selectionKey();
         const semantic = element("semantic").value;
         const options = readComponentOptions();
-        const persistedCurrent = await ensureAuthoringManifest();
+        const current = await ensureAuthoringManifest();
         if (selectionKey() !== key) throw new Error("读取配置期间选择已变化，请重新选择组件后保存。");
-        const synchronized = Psd2Ui.executeAuthoringCommand(persistedCurrent, {
-          command: "sync-layer-tree",
-          input: { snapshot: createSnapshot(persistedCurrent.document.rootLayerId) }
-        }, HumanContext);
-        const current = synchronized.manifest;
+        const snapshot = createSnapshot(current.document.rootLayerId);
         const selected = withAuthoringState(getActiveLayersInfo(), current);
         requireLayersInAuthoringRoot(current, selected);
         componentSelection = selected;
@@ -10679,7 +11959,7 @@
           }
         }, HumanContext);
         const configured = applyViewportOptions(result.manifest, plan.rootLayerId, semantic, options, group.bounds);
-        const persisted = await persistManifest(configured);
+        const persisted = await persistManifest(configured, null, null, snapshot);
         showComponentSaveReceipt(persisted.manifest, plan.rootLayerId, semantic);
         componentSelectionKey = "";
         return {
@@ -10794,8 +12074,8 @@
           element("document-size").textContent = "—";
         }
         try {
-          const selected = getActiveLayersInfo();
-          result.layers = selected.map((layer) => ({ id: layer.id, name: layer.name }));
+          const selected = selectedNativeLayers();
+          result.layers = selected.map((layer) => ({ id: String(layer.id), name: layer.name }));
           const label = selected.length === 1 ? "".concat(selected[0].name, " · #").concat(selected[0].id) : "已选择 ".concat(selected.length, " 个图层");
           element("current-layer").textContent = label;
           element("editing-layer").textContent = label;
@@ -10828,6 +12108,8 @@
         const key = selection ? documentKey() : "";
         const cached = options && options.reuseDocument && revision != null ? authoringStateCache.get(key) : null;
         const reuse = cached && cached.revision === revision;
+        const refreshSnapshots = operationSnapshots || /* @__PURE__ */ new Map();
+        const snapshotForRefresh = (rootLayerId) => createSnapshot(rootLayerId, refreshSnapshots);
         let manifest;
         if (reuse) {
           manifest = cached.manifest;
@@ -10845,7 +12127,7 @@
             element("sidecar-path").textContent = "当前文档不是已保存的本地 PSD";
           }
           try {
-            manifest = await ensureAuthoringManifest();
+            manifest = await ensureAuthoringManifest(snapshotForRefresh);
             if (!isCurrentRefresh(version, selection)) return null;
           } catch (error) {
             if (!isCurrentRefresh(version, selection)) return null;
@@ -10870,22 +12152,26 @@
           element("document-name").value = manifest.document.name || "";
           element("document-submodule").value = manifest.document.submodule || "";
         }
-        if (!reuse) try {
+        const deferredGeometry = hasDeferredGeometry();
+        if (deferredGeometry) {
+          element("document-change-status").textContent = "位置、尺寸和完整变化待核对；手动刷新、保存或导出时自动核对。";
+        } else if (!reuse || cached.comparisonDeferred) try {
           const documentChanges = Psd2Ui.diffSnapshotFromBaseline(
             manifest,
-            createSnapshot(manifest.document.rootLayerId)
+            snapshotForRefresh(manifest.document.rootLayerId)
           );
           element("document-change-status").textContent = documentChanges.length === 0 ? "整个界面根与上次保存一致。" : "".concat(documentChanges.length, " 个图层相对上次保存有变化：").concat(documentChanges.slice(0, 3).map((entry) => entry.name).join("、")).concat(documentChanges.length > 3 ? "……" : "");
         } catch (error) {
           element("document-change-status").textContent = "无法比较：".concat(formatError(error));
         }
-        if (!reuse && revision != null && revision === photoshopCore.getDocumentRevision()) {
+        if (revision != null && revision === photoshopCore.getDocumentRevision()) {
           authoringStateCache.set(key, {
             revision,
             manifest,
             savedDocumentKey,
             sidecarLabel: element("sidecar-path").textContent,
-            changeLabel: element("document-change-status").textContent
+            changeLabel: element("document-change-status").textContent,
+            comparisonDeferred: deferredGeometry
           });
           if (authoringStateCache.size > 4) authoringStateCache.delete(authoringStateCache.keys().next().value);
         }
@@ -10900,6 +12186,7 @@
           return manifest;
         }
         const nodes = manifest.nodes || {};
+        showElement("shared-slice-panel", false);
         if (selected.length === 1) {
           const layer = selected[0];
           const node = nodes[layer.id];
@@ -10922,12 +12209,15 @@
               element("layer-config-status").textContent = "自动识别：".concat(width, " × ").concat(height, " px → ") + (node.semantic === "raw-image" ? "Texture（独立贴图）" : "Sprite（图片）") + "。选择类型并保存可固定用途。";
             }
             loadNodeIntoFields(node);
+            renderSharedSlice(manifest, selected);
           } else {
             element("layer-config-status").textContent = "初始化后新增的图层；当前默认解析为 ".concat(semanticDisplayName(effectiveSemantic), "，导出时会补入配置。");
             setSemantic(effectiveSemantic, true);
           }
-          const changes = Psd2Ui.diffLayerFromBaseline(manifest, layer);
-          element("layer-change-summary").textContent = changes.length === 0 ? "与上次保存一致。" : "相对上次保存：".concat(changes.join("；"), "。");
+          const comparison = displayedLayerChanges(manifest, layer, deferredGeometry);
+          const changes = comparison.changes;
+          element("layer-change-summary").textContent = changes.length === 0 ? comparison.deferred ? "" : "与上次保存一致。" : "相对上次保存：".concat(changes.join("；"), "。");
+          if (comparison.deferred) element("layer-change-summary").textContent += "位置、尺寸和样式待核对。";
         } else {
           const explicitCount = selected.filter((layer) => {
             const node = nodes[layer.id];
@@ -10936,11 +12226,11 @@
           element("effective-semantic").textContent = "多选组合";
           updateSelectionControls(selected, manifest, element("semantic").value);
           element("layer-config-status").textContent = "已选择 ".concat(selected.length, " 个图层，其中 ").concat(explicitCount, " 个已有配置。选择连续同级图层可组合为组件。");
-          const changed = selected.map((layer) => ({
-            name: layer.name,
-            changes: Psd2Ui.diffLayerFromBaseline(manifest, layer)
-          })).filter((entry) => entry.changes.length > 0);
-          element("layer-change-summary").textContent = changed.length === 0 ? "所选图层均与上次保存一致。" : "".concat(changed.length, " 个所选图层有变化：").concat(changed.slice(0, 3).map((entry) => "".concat(entry.name, "（").concat(entry.changes.join("、"), "）")).join("；")).concat(changed.length > 3 ? "；……" : "");
+          const comparisons = selected.map((layer) => __spreadValues({ name: layer.name }, displayedLayerChanges(manifest, layer, deferredGeometry)));
+          const changed = comparisons.filter((entry) => entry.changes.length > 0);
+          const selectedGeometryDeferred = comparisons.some((entry) => entry.deferred);
+          element("layer-change-summary").textContent = changed.length === 0 ? selectedGeometryDeferred ? "" : "所选图层均与上次保存一致。" : "".concat(changed.length, " 个所选图层有变化：").concat(changed.slice(0, 3).map((entry) => "".concat(entry.name, "（").concat(entry.changes.join("、"), "）")).join("；")).concat(changed.length > 3 ? "；……" : "");
+          if (selectedGeometryDeferred) element("layer-change-summary").textContent += "所选组的位置、尺寸和样式待核对。";
         }
         return manifest;
       }
@@ -11169,7 +12459,7 @@
         requireSameDocument(key);
         let activeLayers = [];
         try {
-          activeLayers = getActiveLayersInfo().map((entry) => summarizeLayer(entry.layer));
+          activeLayers = selectedNativeLayers().map(summarizeLayer);
         } catch (error) {
           activeLayers = [];
         }
@@ -11207,7 +12497,8 @@
           resourceNaming: "source",
           module: input.module,
           submodule: input.submodule,
-          name: input.name || documentInfo.name,
+          name: documentInfo.name,
+          sourcePath: documentInfo.path,
           width: documentInfo.width,
           height: documentInfo.height,
           rootLayerId,
@@ -11665,12 +12956,13 @@
           throw new Error("PS-MCP 导出必须显式提供已授权的 UIRes 路径。");
         }
         const prepared = await prepareCurrentDocumentForExport();
-        const persisted = await persistManifest(prepared.manifest, null, McpContext);
+        const persisted = await persistExportManifest(prepared, McpContext);
         const result = await writeBundle(prepared.bundle, { uiResPath: input.uiResPath });
         return __spreadProps(__spreadValues({}, result), {
           diagnostics: combineDiagnostics(
             prepared.preparationDiagnostics,
-            prepared.bundle.diagnostics
+            prepared.bundle.diagnostics,
+            result.warnings
           ),
           reconciliation: prepared.reconciliation,
           sidecarPath: persisted.writeResult.sidecarPath
@@ -11704,9 +12996,11 @@
           if (operationRunning) throw new Error("PSD2UI 正在执行其他操作，请等待完成。");
           operationRunning = true;
           authoringRefreshVersion += 1;
+          operationSnapshots = /* @__PURE__ */ new Map();
           try {
             return await callback();
           } finally {
+            operationSnapshots = null;
             operationRunning = false;
           }
         };
@@ -11727,7 +13021,10 @@
         resetTextDefaults();
         writeStatus("fontKey 已恢复为 default；尚未写入 PSD。", "已恢复文本默认值");
       });
-      element("refresh-context").addEventListener("click", () => run("刷新当前状态", refreshAuthoringState));
+      element("refresh-context").addEventListener("click", () => run("刷新当前状态", async () => {
+        if (typeof photoshopCore.invalidateMetadata === "function") photoshopCore.invalidateMetadata();
+        await refreshAuthoringState();
+      }));
       element("prepare-document").addEventListener("click", () => run("准备 PSD", prepareDocument));
       element("wrap-document-root").addEventListener("click", () => run("建立根组", wrapDocumentRoot));
       element("start-components").addEventListener("click", () => PanelShell.activatePanel("layer"));
@@ -11754,20 +13051,6 @@
         writeStatus("已恢复刚才的角色选择；请点击保存组件配置。", "已返回组件，角色选择待保存");
       });
       element("sync-layer-tree").addEventListener("click", () => run("同步图层树到配置", syncLayerTreeToManifest));
-      element("read-document-name").addEventListener("click", () => run("读取界面名称", async () => {
-        const info = getDocumentInfo();
-        element("document-name").value = info.name;
-        return { name: info.name, source: "PSD 文件名" };
-      }));
-      element("use-layer-name").addEventListener("click", () => run("读取选中图层名", async () => {
-        const layer = requireSingleSelection("读取选中图层名");
-        element("document-name").value = layer.name;
-        return { name: layer.name, source: "选中图层" };
-      }));
-      element("clear-document-name").addEventListener("click", () => {
-        element("document-name").value = "";
-        writeStatus("界面名称已清空；尚未写入 PSD。", "已清空界面名称");
-      });
       element("select-uires").addEventListener("click", () => run("选择输出目录", async () => {
         const folder = await chooseUiResFolder();
         renderUiResFolder(folder);
@@ -11793,7 +13076,8 @@
           resourceNaming: "source",
           module: element("document-module").value || "document",
           submodule: element("document-submodule").value,
-          name: element("document-name").value || documentInfo.name,
+          name: documentInfo.name,
+          sourcePath: documentInfo.path,
           width: documentInfo.width,
           height: documentInfo.height,
           rootLayerId: root.id,
@@ -11832,6 +13116,17 @@
       element("recalculate-component-layout").addEventListener("click", recalculateComponentLayout);
       element("locate-selection-issue").addEventListener("click", () => run("定位组合问题", () => selectLayersById(selectionIssueLayerIds)));
       element("image-type").addEventListener("change", updateSemanticOptions);
+      element("shared-slice-set").addEventListener("click", () => run("指定共用九宫源图", () => setSharedSliceSource(false)));
+      element("shared-slice-clear").addEventListener("click", () => run("取消共用九宫源图", () => setSharedSliceSource(true)));
+      element("shared-slice-locate").addEventListener("click", () => run("定位共用九宫源图", async () => {
+        const key = documentKey();
+        const layer = requireSingleSelection("定位共用九宫源图");
+        const manifest = await ensureAuthoringManifest();
+        requireSameDocument(key);
+        const resource = sharedSliceResource(manifest, layer);
+        if (!resource || !resource.exportSourceLayerId) throw new Error("当前图片尚未指定共用源图。");
+        return selectLayersById([resource.exportSourceLayerId]);
+      }));
       element("add-visual-state").addEventListener("click", () => {
         addVisualStateRow(null, visualStateInputs.length === 0);
         validateVisualStateDraft();
@@ -11922,21 +13217,29 @@
         const textures = bundle.resources.filter((resource) => resource.kind === "texture").length;
         return "".concat(sprites, " 个 Sprite、").concat(textures, " 个 Texture");
       }
+      function resourceReuseSummary(result) {
+        const sources = result && result.sourceReuse || [];
+        if (!sources.length) return "";
+        const detail = sources.slice(0, 3).map((source) => "".concat(source.fileName, " → ").concat(source.existingFile ? "已有图片" : "图层 ".concat(source.sourceLayerId))).join("；");
+        return "同名图片统一复用 ".concat(sources.length, " 项（").concat(detail).concat(sources.length > 3 ? "；其余见详情" : "", "）。");
+      }
       async function preflightCurrentDocument() {
         const prepared = await prepareCurrentDocumentForExport();
         const contentCheck = currentUiResFolder ? await verifyBundle(prepared.bundle, { uiResFolder: currentUiResFolder }) : null;
         const diagnostics = combineDiagnostics(
           prepared.preparationDiagnostics,
-          prepared.bundle.diagnostics
+          prepared.bundle.diagnostics,
+          contentCheck && contentCheck.warnings
         );
         const result = {
           issues: [],
           diagnostics,
           reconciliation: prepared.reconciliation,
+          sourceReuse: contentCheck && contentCheck.sourceReuse || [],
           outputPath: currentUiResFolder && currentUiResFolder.nativePath || "",
           resources: prepared.bundle.resources.map((resource) => resource.fileName)
         };
-        element("export-summary").textContent = "预检通过；".concat(resourceKindSummary(prepared.bundle), "，").concat(diagnostics.length, " 条非阻断诊断。") + (contentCheck ? "已核对图片内容，".concat(contentCheck.reusedResourceCount, " 个公共资源可复用。") : "选择输出目录后可检查同名公共资源。");
+        element("export-summary").textContent = "预检通过；".concat(resourceKindSummary(prepared.bundle), "，").concat(diagnostics.length, " 条非阻断诊断。") + (contentCheck ? "".concat(contentCheck.reusedResourceCount, " 个图片资源可复用。").concat(resourceReuseSummary(contentCheck)) : "选择输出目录后可检查同名公共资源。") + (contentCheck && contentCheck.warnings.length ? "提示：".concat(contentCheck.warnings[0].message) : "");
         return result;
       }
       element("preflight").addEventListener("click", () => run("导出预检", preflightCurrentDocument, { reportPreflight: true }));
@@ -11945,13 +13248,14 @@
         preflightContext = { documentKey: documentKey(), manifest: null, snapshot: null };
         const uiResFolder = requireUiResFolder();
         const prepared = await prepareCurrentDocumentForExport();
-        const persisted = await persistManifest(prepared.manifest);
+        const persisted = await persistExportManifest(prepared, HumanContext);
         const result = await writeBundle(prepared.bundle, { uiResFolder });
-        element("export-summary").textContent = "已导出 ".concat(resourceKindSummary(prepared.bundle), "，复用 ").concat(result.reusedResourceCount || 0, " 个相同公共资源；").concat(result.json);
+        element("export-summary").textContent = "已导出 ".concat(resourceKindSummary(prepared.bundle), "，复用 ").concat(result.reusedResourceCount || 0, " 个图片资源；").concat(resourceReuseSummary(result)).concat(result.warnings.length ? "提示：".concat(result.warnings[0].message, "；") : "").concat(result.json);
         return __spreadProps(__spreadValues({}, result), {
           diagnostics: combineDiagnostics(
             prepared.preparationDiagnostics,
-            prepared.bundle.diagnostics
+            prepared.bundle.diagnostics,
+            result.warnings
           ),
           reconciliation: prepared.reconciliation,
           sidecarPath: persisted.writeResult.sidecarPath
@@ -12035,14 +13339,18 @@
         await new Promise((resolve) => setTimeout(resolve, 100));
         await photoshop.initialize();
         delete globalThis.__PSD2UI_HOST_PROGRESS__;
-        globalThis.__PSD2UI_REFRESH_HOST__ = () => photoshop.refresh();
+        globalThis.__PSD2UI_REFRESH_HOST__ = () => photoshop.refresh({ verifyVisibility: true });
         require_app();
         const commandServer = await startCommandServer({
           automation: globalThis.__PSD2UI_DEV__,
           isUncertain: () => require_hostRpc().isUncertain(),
-          beforeInvoke: () => photoshop.refresh(),
+          beforeInvoke: () => photoshop.refresh({ verifyVisibility: true }),
           run: (label, action) => globalThis.__PSD2UI_RUN__(label, action),
-          status: () => ({ photoshopVersion: photoshop.app.version || "", documentCount: photoshop.app.documents.length })
+          status: () => ({
+            photoshopVersion: photoshop.app.version || "",
+            documentCount: photoshop.app.documents.length,
+            performance: require_performance().snapshot()
+          })
         });
         const notifications = await startNotifications({
           bridge: window.__adobe_cep__,

@@ -1,0 +1,245 @@
+{
+  "formatVersion": 1,
+  "sourceProject": "psd2ui",
+  "sourceRef": "origin/codex/cep9-migration",
+  "sourceCommit": "fd25502246bb6ca95fb9ab7ad3b06324a20ff3a2",
+  "targetBranch": "main",
+  "sourceChanges": 56,
+  "copiedFiles": [
+    {
+      "path": "psd2ui/Contracts/psd2ui.schema.json",
+      "sha256": "b0902553d594b4742ef865ab3f50bd447b8ff0428f7b6f41fbbef939beb11de5"
+    },
+    {
+      "path": "psd2ui/Core/authoringCommands.js",
+      "sha256": "26e58e4711d53ba53c2fa5d5accc04ee29d47b17d9d0b93a51cf8292fdecab98"
+    },
+    {
+      "path": "psd2ui/Core/bundle.js",
+      "sha256": "4832eb217a4dc1c196ffb7db9efd1d92cf0d4c6f5e8a3b44877cc19fb21b970d"
+    },
+    {
+      "path": "psd2ui/Core/documentIdentity.js",
+      "sha256": "591fd06532681ea992339e4cfb0b3926bd93af7ac9cf15632f4e06a160cc3b3f"
+    },
+    {
+      "path": "psd2ui/Core/index.js",
+      "sha256": "63eb0cc686ed9cecac7e8511babd92f75e5f40f15f47445e20d6a71fd53c2c3d"
+    },
+    {
+      "path": "psd2ui/Core/resourceRegistry.js",
+      "sha256": "467516f6f69a4fc8240b282789bc574bb24b7f119ea5da8c073b7cae939355a9"
+    },
+    {
+      "path": "psd2ui/Core/sharedNineSlice.js",
+      "sha256": "6e1af160c1432f7415db36369df3d36e2acafb5d040d223021f9327964fada9a"
+    },
+    {
+      "path": "psd2ui/Core/snapshot.js",
+      "sha256": "ed3e751dbca57ff9658ee842036b10005336e686d27099484999d4f914ff10b4"
+    },
+    {
+      "path": "psd2ui/Core/validation.js",
+      "sha256": "1ddf8b9bd0fe6a03c2449f6bcbd4a72ea3b125c39b5346c4d2d240f5a6f3954d"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/CSXS/manifest.xml",
+      "sha256": "639120db96ed3d2f91d842ecd7f8b219794c0021a0e36ad66d152b3aab8f87a5"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/host/photoshop.jsx",
+      "sha256": "2cc5933b86fd1f3c14712e2af630ded36adc424b8f2c42bc8afa01d5786c077d"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/index.html",
+      "sha256": "671835dff5b82fc122c6f8538432a6e75ff9121b3751edac94c95126547a34ec"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/panel.js",
+      "sha256": "3fe99fcb37a57d9fe8ce55c60ae510754b38c3b7dce37deca84508b920adb600"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/src/commandServer.js",
+      "sha256": "fb17ec65410cf9cae08a623c6ad8e2c94649e2babf0100fd52e12c505ea099fd"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/src/entry.js",
+      "sha256": "99fd7091ea3ccde3c369b464b9455139fe78bf302a1cb6d4eb5e7980a106c73e"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/src/hostRpc.js",
+      "sha256": "16f2d06b29295b1118adcddb3ae3d46ada09dd6c72630d51d55e21c694e70d54"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/src/imaging.js",
+      "sha256": "32058c25509d455cbf97a5337005051a2e868c04e3bf4d48b2d0d7c47d7ecda2"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/src/notifications.js",
+      "sha256": "06ab6b877198900d91703fa7d6787e5fa315c753fb1e25a6c54ab515673b1bd1"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/src/performance.js",
+      "sha256": "f2753eda342da7a3d7516476e67f770980df9b781401616e86bb3df508a116d6"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/src/photoshop.js",
+      "sha256": "90d3dac745448624340a2600567cfeefc3167520f93dfeb454717e136163564a"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI-CEP/src/xmpStore.js",
+      "sha256": "dfa64253ecbd05ad93c2ddec13786f52c3da327e26365dd43c6252e2409fb047"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/app.js",
+      "sha256": "e7480b0b9b82fbca7594ed16a71e87628ee4b858220a053e9cf1bca10343ab14"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/authoringCommands.js",
+      "sha256": "26e58e4711d53ba53c2fa5d5accc04ee29d47b17d9d0b93a51cf8292fdecab98"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/bundle.js",
+      "sha256": "4832eb217a4dc1c196ffb7db9efd1d92cf0d4c6f5e8a3b44877cc19fb21b970d"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/documentIdentity.js",
+      "sha256": "591fd06532681ea992339e4cfb0b3926bd93af7ac9cf15632f4e06a160cc3b3f"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/index.js",
+      "sha256": "63eb0cc686ed9cecac7e8511babd92f75e5f40f15f47445e20d6a71fd53c2c3d"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/resourceRegistry.js",
+      "sha256": "467516f6f69a4fc8240b282789bc574bb24b7f119ea5da8c073b7cae939355a9"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/sharedNineSlice.js",
+      "sha256": "6e1af160c1432f7415db36369df3d36e2acafb5d040d223021f9327964fada9a"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/snapshot.js",
+      "sha256": "ed3e751dbca57ff9658ee842036b10005336e686d27099484999d4f914ff10b4"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/generated/core/validation.js",
+      "sha256": "1ddf8b9bd0fe6a03c2449f6bcbd4a72ea3b125c39b5346c4d2d240f5a6f3954d"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/index.html",
+      "sha256": "4be1fa83d5984a6e124ebb0a40f007cbade9f9c715a02def613269c380d3f1f8"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/src/exporter.js",
+      "sha256": "4e70d132615a904983d9e3d9d85f4bab6e7c59e740ba12d1216dcd2df7f6baf3"
+    },
+    {
+      "path": "psd2ui/Plus-ins/PSD2UI/src/photoshopDocument.js",
+      "sha256": "8d804b9833714c9719cfaadfaa0fff5e273a1f3786f064b0ef09c76ce4f707f3"
+    },
+    {
+      "path": "psd2ui/Tests/CEP/bundle.test.js",
+      "sha256": "30f79a08c9b670c062e6e2e0300f4f3d677fe33270dac949e96f7f5ea4c76c44"
+    },
+    {
+      "path": "psd2ui/Tests/CEP/host.test.js",
+      "sha256": "e81d454a1c0b1833af88d34c73958b72f935db4d275f41e2a2818c2e34aebed5"
+    },
+    {
+      "path": "psd2ui/Tests/CEP/imaging.test.js",
+      "sha256": "21a33982cfb361a8cd52c79d861ab6947c810ab3d9ae6bdc0e3f73c3f1ffc6aa"
+    },
+    {
+      "path": "psd2ui/Tests/CEP/notifications.test.js",
+      "sha256": "5bc4e2696b58a07df111a803389cdc96c8e970e74458d5190f5d1dede73ea8d5"
+    },
+    {
+      "path": "psd2ui/Tests/CEP/photoshop.test.js",
+      "sha256": "beabfa52a2cb32b93282640da14b5496504541764b1d5764733835f8d1e07df8"
+    },
+    {
+      "path": "psd2ui/Tests/CEP/session-options.test.js",
+      "sha256": "51fd03d9c935f83e747d404261b517fc33d98b2f40fba738477a72d7b5d9dc19"
+    },
+    {
+      "path": "psd2ui/Tests/CEP/xmp-store.test.js",
+      "sha256": "4fce26150f431bc64ef26b5880a296c625ffa272564d15a4cdee6632c69c9dfa"
+    },
+    {
+      "path": "psd2ui/Tests/Core/document-identity.test.js",
+      "sha256": "b1316734e7a24bba2ea516d1e87a8c9acfcec3c4497bfd3d1f6c9fee718e41b9"
+    },
+    {
+      "path": "psd2ui/Tests/Core/shared-nine-slice.test.js",
+      "sha256": "5c04dd62359f22b4df17c2fc2af5cb95360bbb1f54252dd3ca35a747270172e3"
+    },
+    {
+      "path": "psd2ui/Tests/Core/text-layout-mode.test.js",
+      "sha256": "17e4ca57c634744890f179d729081986828916a3f125c126015096ffd7dba6b0"
+    },
+    {
+      "path": "psd2ui/Tests/UXP/component-panel.test.js",
+      "sha256": "a36313e33eb280c30af8a5613de45b9a1be8bbe14457b9c8a246bc8c0fe00f4b"
+    },
+    {
+      "path": "psd2ui/Tests/UXP/export-transaction.test.js",
+      "sha256": "b044a3d3afc6aeca8a779657241abc69fc6345c94bb34ba0ce31ba42bfacc3a4"
+    },
+    {
+      "path": "psd2ui/Tests/UXP/panel-compatibility.test.js",
+      "sha256": "51d0066fe4feaac119aef764c9794ac95868f59453fa2015199e062d1d23671a"
+    },
+    {
+      "path": "psd2ui/Tests/UXP/text-effects-host.test.js",
+      "sha256": "39dc64ad344a65bd5a728fcd00e30a7ffa5a428868cf6038fbc266e731f2debb"
+    },
+    {
+      "path": "psd2ui/scripts/Invoke-Psd2UiCepPerformance.ps1",
+      "sha256": "2c60a3960ea1acdd22cbbabd9348f17054d1d80c69b33637909ed84d28413ff2"
+    },
+    {
+      "path": "psd2ui/scripts/benchmark-cep.js",
+      "sha256": "d6ac4f4e5d1896ce2c635ee1f4d4a5a88bff909114471d485ce8ef9e82d6d76a"
+    },
+    {
+      "path": "psd2ui/scripts/cep-install/Install.ps1",
+      "sha256": "81403381c37133fd469ee4f4a91a469b6e49f1c4cd276ea63ffaeeda11e55d60"
+    },
+    {
+      "path": "psd2ui/scripts/cep-install/Test-Install.ps1",
+      "sha256": "d6e4f10630e9ba82e5ac2d620f5f1cfc49673f9bda22163da0398d0cca1a1212"
+    },
+    {
+      "path": "psd2ui/scripts/cep-session-bridge.ps1",
+      "sha256": "2f1d0ae4163ccb761d349154199f9a83e9e11abf75afc71f4959996c657a1779"
+    },
+    {
+      "path": "psd2ui/scripts/cep-session-options.js",
+      "sha256": "25f07dcccd34e023310cfa0b56fd735b24d18aff2eb280e1a5bcac7ebacc339a"
+    },
+    {
+      "path": "psd2ui/scripts/cep-visibility-smoke.jsx",
+      "sha256": "804fecc5c2f4eaae3b65322b6e725d62722fc1aad31271bf64a76ab55e67547e"
+    },
+    {
+      "path": "psd2ui/scripts/verify-cep-session.js",
+      "sha256": "c0160ae69304939bd7adda813689ef2154231d243accebd3c267317c1a9ab50d"
+    }
+  ],
+  "adaptedFiles": [
+    {
+      "path": "psd2ui/scripts/package-cep.ps1",
+      "sha256": "af89a497291bb08c02ec5c8dea85f5eebc2c073b8d021155b43ae3ff6df896be",
+      "sourceSha256": "7eee7d7d349d493e6f15bf249622c484c35b5884dce48776f581a7e05e0f6327",
+      "reason": "public default output directory"
+    }
+  ],
+  "excludedDirectories": [
+    "Adapters",
+    "Tests/Adapters"
+  ],
+  "verification": "static-content-check",
+  "testsRun": false,
+  "runtimeVerified": false
+}

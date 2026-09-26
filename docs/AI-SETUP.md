@@ -17,7 +17,7 @@
 
 ## 1. 安装面板并准备工具依赖
 
-先按 [仓库 README](../README.md) 安装 **CEP 0.3.8** 并打开面板。安装 Node.js（20.x 至少 20.19，22.x 至少 22.12，或工具支持的更新版本）。本分支使用 Windows 自带 PowerShell 5.1，不需要 UDT 或 PowerShell 7。
+先按 [仓库 README](../README.md) 安装 **CEP 0.4.6** 并打开面板。安装 Node.js（20.x 至少 20.19，22.x 至少 22.12，或工具支持的更新版本）。本分支使用 Windows 自带 PowerShell 5.1，不需要 UDT 或 PowerShell 7。
 
 在包含 README.md 的仓库根执行：
 

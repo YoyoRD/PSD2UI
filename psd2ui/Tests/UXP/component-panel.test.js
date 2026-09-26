@@ -6,6 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 const Core = require('../../Core');
+const { createPreset } = require('../../Core/defaults');
 const PluginRoot = path.resolve(__dirname, '../../Plus-ins/PSD2UI');
 const read = (name) => fs.readFileSync(path.join(PluginRoot, name), 'utf8');
 
@@ -254,10 +255,20 @@ class FakeElement {
 
 async function panelHarness(layers, options = {}) {
   const host = photoshopHost(layers);
+  if (options.documentPath) {
+    host.document.path = options.documentPath;
+    host.document.title = options.documentPath.split(/[\\/]/).pop();
+  }
   if (options.getDocumentRevision) host.photoshop.core.getDocumentRevision = options.getDocumentRevision;
+  if (options.getSnapshotRevision) host.photoshop.core.getSnapshotRevision = options.getSnapshotRevision;
+  if (options.hasDeferredSnapshot) host.photoshop.core.hasDeferredSnapshot = options.hasDeferredSnapshot;
   if (options.beforeSnapshot) {
     const createSnapshot = host.api.createSnapshot;
     host.api.createSnapshot = (...args) => { options.beforeSnapshot(); return createSnapshot(...args); };
+  }
+  if (options.onProjection) for (const name of ['getActiveLayersInfo', 'readLayer']) {
+    const original = host.api[name];
+    host.api[name] = (...args) => { options.onProjection(name); return original(...args); };
   }
   const elements = {};
   for (const match of read('index.html').matchAll(/\bid="([^"]+)"/g)) elements[match[1]] = new FakeElement();
@@ -274,7 +285,7 @@ async function panelHarness(layers, options = {}) {
       if (options.failWrite) throw new Error('模拟 PSD 保存失败');
       stored = JSON.parse(JSON.stringify(manifest)); writes += 1;
       if (options.corruptWrite) stored.nodes['2'].semantic = 'image';
-      return { sidecarPath: 'F:/Art/测试界面.psd2ui.authoring.json' };
+      return { sidecarPath: 'F:/Art/测试界面.psd2ui.authoring.json', ...(options.verifiedReceipt ? { verifiedManifest: manifest } : {}) };
     },
     async getDocumentXmp() { return JSON.stringify(stored); },
     async setDocumentXmp(serialized) { stored = JSON.parse(serialized); },
@@ -284,7 +295,9 @@ async function panelHarness(layers, options = {}) {
   xmp.writeManifestInCurrentModal = xmp.writeManifest;
   const sandbox = { console: { error() {} }, setTimeout, clearTimeout, document: { getElementById: (id) => elements[id] || null, createElement: () => new FakeElement() }, window: {}, require(name) {
     if (name === 'photoshop') return host.photoshop;
-    if (name === './generated/core/index') return Core;
+    if (name === './generated/core/index') return options.onCommand ? { ...Core, executeAuthoringCommand(...args) {
+      options.onCommand(args[1].command); return Core.executeAuthoringCommand(...args);
+    } } : Core;
     if (name === './src/preflightIssues') return require('../../Plus-ins/PSD2UI/src/preflightIssues');
     if (name === './src/photoshopDocument') return host.api;
     if (name === './src/xmpStore') return xmp;
@@ -328,6 +341,323 @@ test('CEP selection refresh reuses document projection but invalidates it for ed
   assert.equal(reads, original + 4, 'unversioned or busy hosts must not reuse a projection');
 });
 
+test('deferred group geometry never reports placeholder dimensions as saved changes on first or cached refresh', async () => {
+  const group = layer(2, '按钮', 'group'); group.layers = [layer(3, 'comm_bt_0001')];
+  group.boundsNoEffects = { ...group.bounds };
+  const stored = Core.captureBaseline(sourceManifest([group]), photoshopHost([group]).api.createSnapshot('document-root'));
+  group.bounds = group.boundsNoEffects = { left: 0, top: 0, right: 720, bottom: 1560 };
+  const h = await panelHarness([group], { stored, getDocumentRevision: () => 1, hasDeferredSnapshot: () => true });
+  h.sandbox.__PSD2UI_REFRESH_HOST__ = async () => { throw new Error('Background display must not request exact geometry'); };
+  for (const options of [undefined, { reuseDocument: true }]) {
+    await h.sandbox.refreshAuthoringState(options);
+    assert.match(h.elements['document-change-status'].textContent, /待核对/);
+    assert.doesNotMatch(h.elements['document-change-status'].textContent, /有变化|一致/);
+    assert.match(h.elements['layer-change-summary'].textContent, /待核对/);
+    assert.doesNotMatch(h.elements['layer-change-summary'].textContent, /位置或尺寸已改变|图层样式已改变|一致/);
+    assert.match(h.elements['structure-root-summary'].textContent, /尺寸待核对/);
+    assert.doesNotMatch(h.elements['structure-root-summary'].textContent, /720|1560/);
+  }
+  group.name = '新按钮'; group.visible = false;
+  await h.sandbox.refreshAuthoringState({ reuseDocument: true });
+  assert.match(h.elements['layer-change-summary'].textContent, /名称：按钮 → 新按钮/);
+  assert.match(h.elements['layer-change-summary'].textContent, /可见性：可见 → 隐藏/);
+  assert.equal(h.writes, 0);
+});
+
+test('deferred multi-selection preserves exact leaf changes and compares precise geometry once available', async () => {
+  const group = layer(2, '按钮', 'group'); group.layers = [layer(3, 'comm_bt_0001')];
+  const image = layer(4, 'comm_sp_0001');
+  const stored = Core.captureBaseline(sourceManifest([group, image]), photoshopHost([group, image]).api.createSnapshot('document-root'));
+  let deferred = true, snapshotRevision = 1;
+  group.bounds = { left: 0, top: 0, right: 720, bottom: 1560 };
+  image.visible = false;
+  const h = await panelHarness([group, image], { stored, getDocumentRevision: () => 1,
+    getSnapshotRevision: () => snapshotRevision, hasDeferredSnapshot: () => deferred });
+  assert.match(h.elements['layer-change-summary'].textContent, /可见性：可见 → 隐藏/);
+  assert.match(h.elements['layer-change-summary'].textContent, /所选组的位置、尺寸和样式待核对/);
+  assert.doesNotMatch(h.elements['layer-change-summary'].textContent, /位置或尺寸已改变/);
+  group.bounds = { left: 0, top: 0, right: 100, bottom: 40 }; image.visible = true;
+  deferred = false; snapshotRevision++;
+  await h.sandbox.refreshAuthoringState({ reuseDocument: true });
+  assert.match(h.elements['document-change-status'].textContent, /与上次保存一致/);
+  assert.equal(h.elements['layer-change-summary'].textContent, '所选图层均与上次保存一致。');
+  h.host.document.activeLayers = [group]; group.bounds.right = 120; snapshotRevision++;
+  await h.sandbox.refreshAuthoringState();
+  assert.match(h.elements['layer-change-summary'].textContent, /位置或尺寸已改变/);
+  assert.match(h.elements['structure-root-summary'].textContent, /120 × 40 px/);
+});
+
+test('component saving after deferred display captures the precise refreshed baseline', async () => {
+  const group = layer(2, '按钮', 'group'); group.layers = [layer(3, 'comm_bt_0001')];
+  const stored = sourceManifest([group]);
+  let deferred = true, revision = 1;
+  group.bounds = { left: 0, top: 0, right: 720, bottom: 1560 };
+  const h = await panelHarness([group], { stored, verifiedReceipt: true, getDocumentRevision: () => revision,
+    getSnapshotRevision: () => revision, hasDeferredSnapshot: () => deferred });
+  h.elements.semantic.value = 'button'; await h.elements.semantic.dispatch('change');
+  h.sandbox.__PSD2UI_REFRESH_HOST__ = async () => {
+    group.bounds = { left: 10, top: 20, right: 110, bottom: 60 }; deferred = false; revision++;
+  };
+  await h.elements['structure-component'].dispatch('click');
+  assert.equal(h.writes, 1, h.elements.status.value);
+  assert.deepEqual(h.stored.baseline.layers['2'].bounds, { left: 10, top: 20, right: 110, bottom: 60 });
+  assert.equal(h.elements['layer-change-summary'].textContent, '与上次保存一致。');
+  assert.match(h.elements['structure-root-summary'].textContent, /100 × 40 px/);
+});
+
+test('CEP panel tabs reuse the current manifest and full-document comparison', async () => {
+  let reads = 0, snapshots = 0;
+  const h = await panelHarness([layer(2, 'comm_sp_001')], {
+    getDocumentRevision: () => 1, beforeRead: async () => { reads++; }, beforeSnapshot: () => { snapshots++; }
+  });
+  const initialReads = reads, initialSnapshots = snapshots;
+  for (const name of ['layer', 'export', 'settings', 'prepare']) {
+    h.sandbox.handlePanelChanged(name); await new Promise(setImmediate);
+  }
+  assert.equal(reads, initialReads);
+  assert.equal(snapshots, initialSnapshots);
+});
+
+test('selection refresh projects the selected group only once and does not project it for header or root status', async () => {
+  const root = layer(2, '界面根', 'group');
+  root.layers = Array.from({ length: 120 }, (_, index) => layer(index + 3, `comm_sp_${index + 1000}`));
+  const projections = [];
+  let snapshots = 0;
+  const h = await panelHarness([root], { stored: sourceManifest([root]),
+    getDocumentRevision: () => 1, getSnapshotRevision: () => 1,
+    beforeSnapshot: () => snapshots++, onProjection: name => projections.push(name) });
+  const baselineSnapshots = snapshots;
+  projections.length = 0;
+  await h.sandbox.refreshAfterSelectionChange();
+  assert.deepEqual(projections, ['getActiveLayersInfo']);
+  assert.equal(snapshots, baselineSnapshots, 'selection-only refresh must not rebuild a document snapshot');
+  assert.equal(h.elements['current-layer'].textContent, '界面根 · #2');
+  assert.equal(h.elements['wrap-document-root'].textContent, '已有一个根组');
+  assert.match(h.elements['structure-root-summary'].textContent, /界面根/);
+  assert.equal(h.writes, 0);
+});
+
+test('automation inspect summarizes native selected layers in document order without projecting descendants', async () => {
+  const root = layer(2, '分组', 'group'); root.layers = [layer(3, 'comm_sp_0001')];
+  const other = layer(4, 'comm_sp_0002');
+  const projections = [];
+  const h = await panelHarness([root, other], { stored: sourceManifest([root, other]), onProjection: name => projections.push(name) });
+  h.host.document.activeLayers = [other, root];
+  projections.length = 0;
+  const result = await h.sandbox.__PSD2UI_DEV__.inspect({ expectedDocumentPath: h.host.document.path });
+  assert.deepEqual(projections, []);
+  assert.deepEqual(Array.from(result.activeLayers, item => item.id), ['2', '4']);
+  assert.equal(result.activeLayers[0].childCount, 1);
+  assert.equal(result.activeLayers[0].bounds.right, root.bounds.right);
+  assert.equal(result.manifest.nodeCount, Object.keys(h.stored.nodes).length);
+  assert.equal(h.writes, 0);
+});
+
+test('one versioned authoring refresh shares its projection with the full-document baseline comparison', async () => {
+  const root = layer(2, '分组', 'group'); root.layers = [layer(3, 'comm_sp_0001')];
+  const stored = Core.captureBaseline(sourceManifest([root]), photoshopHost([root]).api.createSnapshot('document-root'));
+  let revision = 1, snapshots = 0;
+  const h = await panelHarness([root], { stored,
+    getDocumentRevision: () => revision, getSnapshotRevision: () => revision, beforeSnapshot: () => snapshots++ });
+  snapshots = 0;
+  root.layers[0].visible = false; revision++;
+  await h.sandbox.refreshAuthoringState({ reuseDocument: true });
+  assert.equal(snapshots, 1);
+  assert.match(h.elements['document-change-status'].textContent, /1 个图层相对上次保存有变化/);
+  snapshots = 0;
+  await h.sandbox.refreshAuthoringState();
+  assert.equal(snapshots, 1, 'explicit refresh still reads a fresh snapshot');
+});
+
+test('MCP initialization shares one stable snapshot through persistence without a panel refresh', async () => {
+  const root = layer(2, '分组', 'group'); root.layers = [layer(3, 'comm_sp_0001')];
+  let snapshots = 0;
+  const h = await panelHarness([root], { getDocumentRevision: () => 1, getSnapshotRevision: () => 1,
+    verifiedReceipt: true, beforeSnapshot: () => snapshots++ });
+  snapshots = 0;
+  await h.sandbox.__PSD2UI_RUN__('initialize', () => h.sandbox.__PSD2UI_DEV__.initialize({
+    expectedDocumentPath: h.host.document.path, module: 'comm', rootLayerId: 'document-root'
+  }));
+  assert.equal(snapshots, 1);
+  assert.equal(h.writes, 1);
+  assert.equal(h.stored.nodes['3'].semantic, 'image');
+  assert.equal(h.stored.baseline.layers['3'].name, root.layers[0].name);
+  assert.equal(h.sandbox.__PSD2UI_BUSY__(), false);
+});
+
+test('export preserves a saved unchanged PSD and still saves dirty or changed documents', async () => {
+  const image = layer(2, 'comm_sp_0001');
+  const snapshot = photoshopHost([image]).api.createSnapshot('document-root');
+  const configured = Core.prepareManifestForExport(sourceManifest([image]), snapshot).manifest;
+  const stored = Core.captureBaseline(configured, snapshot);
+  const h = await panelHarness([image], { stored, verifiedReceipt: true });
+  h.host.document.saved = true;
+  const prepared = () => h.sandbox.prepareBundle(h.stored);
+  await h.sandbox.persistExportManifest(prepared(), { actor: 'mcp' });
+  assert.equal(h.writes, 1, 'the first export binds the saved configuration to this PSD');
+  await h.sandbox.persistExportManifest(prepared(), { actor: 'mcp' });
+  assert.equal(h.writes, 1, 'the repeated export does not save an unchanged PSD');
+  h.host.document.saved = false;
+  await h.sandbox.persistExportManifest(prepared(), { actor: 'mcp' });
+  assert.equal(h.writes, 2, 'unsaved Photoshop changes still require a save');
+  h.host.document.saved = true;
+  image.opacity = 50;
+  await h.sandbox.persistExportManifest(prepared(), { actor: 'mcp' });
+  assert.equal(h.writes, 3, 'changed layer configuration still updates the PSD and sidecar');
+});
+
+test('MCP snapshot reuse follows revision changes and discards a cache when the host becomes busy', async () => {
+  const item = layer(2, 'comm_sp_0001');
+  let revision = 1, snapshots = 0;
+  const h = await panelHarness([item], { getSnapshotRevision: () => revision, beforeSnapshot: () => snapshots++ });
+  const snapshot = () => h.sandbox.__PSD2UI_DEV__.snapshot({ expectedDocumentPath: h.host.document.path, rootLayerId: 'document-root' });
+  snapshots = 0;
+  await h.sandbox.__PSD2UI_RUN__('snapshot', async () => {
+    await snapshot(); await snapshot();
+    assert.equal(snapshots, 1);
+    item.name = 'comm_sp_0002'; revision++;
+    assert.equal((await snapshot()).root.children[0].name, item.name);
+    assert.equal(snapshots, 2);
+    revision = null;
+    await snapshot(); await snapshot();
+    assert.equal(snapshots, 4, 'busy or unversioned hosts must read live data each time');
+    item.name = 'comm_sp_0003'; revision = 2;
+    assert.equal((await snapshot()).root.children[0].name, item.name);
+    assert.equal(snapshots, 5, 'a stable token after a busy interval must not resurrect the old snapshot');
+  });
+  await h.sandbox.__PSD2UI_RUN__('snapshot', snapshot);
+  assert.equal(snapshots, 6, 'a new request does not inherit the previous operation cache');
+  await assert.rejects(h.sandbox.__PSD2UI_RUN__('failure', async () => { await snapshot(); throw new Error('failed operation'); }), /failed operation/);
+  assert.equal(h.sandbox.__PSD2UI_BUSY__(), false);
+  await snapshot(); await snapshot();
+  assert.equal(snapshots, 9, 'failure must clear the operation cache');
+});
+
+test('component save shares one snapshot, reconciles once and publishes its verified result directly', async () => {
+  const group = layer(2, '购买按钮', 'group'); group.layers = [layer(3, 'comm_bt_0001'), layer(4, '购买', 'text')];
+  let snapshots = 0, reads = 0; const commands = [];
+  const h = await panelHarness([group], { stored: sourceManifest([group]), verifiedReceipt: true,
+    getDocumentRevision: () => 1, getSnapshotRevision: () => 1,
+    beforeSnapshot: () => snapshots++, beforeRead: () => reads++, onCommand: command => commands.push(command) });
+  h.host.document.activeLayers = [group];
+  h.elements.semantic.value = 'button'; await h.elements.semantic.dispatch('change');
+  snapshots = 0; reads = 0; commands.length = 0;
+  await h.elements['structure-component'].dispatch('click');
+  assert.equal(h.writes, 1, h.elements.status.value);
+  assert.equal(h.stored.nodes['2'].semantic, 'button');
+  assert.equal(snapshots, 1);
+  assert.equal(reads, 1, 'saving must not reread the verified manifest for status rendering');
+  assert.equal(commands.filter(command => command === 'sync-layer-tree').length, 1);
+  assert.equal(commands.filter(command => command === 'capture-baseline').length, 1);
+});
+
+test('component save reconciles final presets including Photoshop fields and converted role resources', async () => {
+  const group = layer(2, '选项', 'group'); group.visible = false; group.opacity = 45;
+  const background = layer(3, 'comm_sp_0001'); background.visible = false; background.opacity = 30;
+  const graphic = layer(4, 'comm_sp_0002'); graphic.opacity = 55;
+  const label = layer(5, '选项文字', 'text'); label.opacity = 65;
+  label.textItem.characterStyle.size = 31;
+  group.layers = [background, graphic, label];
+  const stored = sourceManifest([group]);
+  stored.nodes['3'] = { ...createPreset('raw-image'), id: stored.nodes['3'].id,
+    layerId: '3', name: background.name, rawImage: { ...createPreset('raw-image').rawImage, resourceId: 'texture-role' } };
+  stored.resourceRegistry.resources['texture-role'] = { id: 'texture-role', status: 'active',
+    sourceLayerId: '3', kind: 'texture', fileName: 'comm_sp_0001.png' };
+  stored.resourceRegistry.layerBindings['3'] = 'texture-role';
+  // 允许按实际文字类型选作角色；保存预设时需要恢复文字的 Photoshop 数据。
+  stored.nodes['5'] = { ...createPreset('image'), id: stored.nodes['5'].id, layerId: '5', name: label.name };
+  const h = await panelHarness([group], { stored, verifiedReceipt: true,
+    getDocumentRevision: () => 1, getSnapshotRevision: () => 1 });
+  h.elements.semantic.value = 'toggle'; await h.elements.semantic.dispatch('change');
+  const fields = h.elements['component-role-fields'].children;
+  for (const [index, id] of [[0, '3'], [1, '4'], [2, '5']]) {
+    fields[index].children[1].value = id; await fields[index].children[1].dispatch('change');
+  }
+  await h.elements['structure-component'].dispatch('click');
+  assert.equal(h.writes, 1, h.elements.status.value);
+  assert.equal(h.stored.nodes['2'].visible, 'disabled');
+  assert.equal(h.stored.nodes['2'].opacity, 0.45);
+  assert.equal(h.stored.nodes['3'].semantic, 'image');
+  assert.equal(h.stored.nodes['3'].visible, 'disabled');
+  assert.equal(h.stored.nodes['3'].opacity, 0.3);
+  assert.equal(h.stored.nodes['5'].semantic, 'text');
+  assert.equal(h.stored.nodes['5'].text.value, '选项文字');
+  assert.equal(h.stored.nodes['5'].text.fontSize, 31);
+  assert.equal(h.stored.nodes['5'].opacity, 0.65);
+  assert.equal(h.stored.resourceRegistry.resources['texture-role'].status, 'retired');
+  const prepared = Core.prepareManifestForExport(h.stored, h.host.api.createSnapshot('document-root'), { allocateResources: false });
+  assert.deepEqual(h.stored, prepared.manifest, 'the saved result must already match full reconciliation of the final configuration');
+});
+
+test('one final component reconciliation initializes newly added role layers and removes deleted nodes', async () => {
+  const previous = layer(9, 'comm_sp_0009');
+  const stored = sourceManifest([previous]);
+  const group = layer(2, '新增按钮', 'group');
+  group.layers = [layer(3, 'comm_bt_0001'), layer(4, '新增文字', 'text')];
+  const commands = [];
+  const h = await panelHarness([group], { stored, verifiedReceipt: true,
+    getDocumentRevision: () => 1, getSnapshotRevision: () => 1, onCommand: command => commands.push(command) });
+  h.elements.semantic.value = 'button'; await h.elements.semantic.dispatch('change');
+  commands.length = 0;
+  await h.elements['structure-component'].dispatch('click');
+  assert.equal(h.writes, 1, h.elements.status.value);
+  assert.equal(h.stored.nodes['2'].semantic, 'button');
+  assert.equal(h.stored.nodes['3'].semantic, 'image');
+  assert.equal(h.stored.nodes['4'].text.value, '新增文字');
+  assert.equal(h.stored.nodes['9'], undefined);
+  assert.equal(commands.filter(command => command === 'sync-layer-tree').length, 1);
+});
+
+test('layer projection caches preserve unrelated text projections when one branch changes', () => {
+  const group = layer(2, 'Group', 'group'); group.layers = [layer(3, 'Text', 'text')];
+  const other = layer(4, 'Other text', 'text');
+  const h = photoshopHost([group, other]);
+  const revisions = new Map([[2, 1], [3, 1], [4, 1]]);
+  h.photoshop.core.getLayerRevision = target => revisions.get(target.id);
+  let descriptorReads = 0;
+  h.photoshop.action.batchPlay = () => { descriptorReads++; return [{}]; };
+  h.api.createSnapshot('document-root'); const before = descriptorReads;
+  group.layers[0].visible = false; revisions.set(2, 2); revisions.set(3, 2);
+  const updated = h.api.createSnapshot('document-root');
+  assert.equal(updated.root.children[0].children[0].visible, false);
+  assert.equal(descriptorReads - before, 2, 'the unaffected text layer must remain cached');
+});
+
+test('the shared layer locator submits one selection batch without changing visibility', async () => {
+  const items = [layer(2, 'A'), layer(3, 'B'), layer(4, 'C')]; items[1].visible = false;
+  const h = photoshopHost(items), calls = [], original = h.photoshop.action.batchPlay;
+  h.photoshop.action.batchPlay = async (commands, options) => { calls.push(commands); return original(commands, options); };
+  await h.api.selectLayersById(['2', '3', '4']);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].length, 3);
+  assert.deepEqual(h.document.activeLayers.map(item => item.id), [2, 3, 4]);
+  assert.equal(items[1].visible, false);
+});
+
+test('CEP layer projections reuse descriptors, invalidate on visibility/content changes and return independent values', () => {
+  const group = layer(2, 'Group', 'group'); group.layers = [layer(3, 'Text', 'text')];
+  const h = photoshopHost([group]);
+  let revision = 1, descriptorReads = 0;
+  h.photoshop.core.getSnapshotRevision = () => revision;
+  h.photoshop.action.batchPlay = () => { descriptorReads++; return [{}]; };
+  const first = h.api.readLayer(group), initialReads = descriptorReads;
+  first.children[0].name = 'Caller mutation';
+  assert.equal(h.api.readLayer(group).children[0].name, 'Text');
+  assert.equal(h.api.createSnapshot('document-root').root.children[0].children[0].name, 'Text');
+  assert.equal(descriptorReads, initialReads);
+  group.layers[0].visible = false; revision++;
+  assert.equal(h.api.readLayer(group).children[0].visible, false);
+  assert.ok(descriptorReads > initialReads);
+  revision = null;
+  group.layers[0].name = 'During mutation';
+  assert.equal(h.api.readLayer(group).children[0].name, 'During mutation');
+  revision = 2;
+  group.layers[0].name = 'After mutation';
+  assert.equal(h.api.readLayer(group).children[0].name, 'After mutation');
+  group.bounds.left = NaN; revision++;
+  assert.ok(Number.isNaN(h.api.readLayer(group).bounds.left), 'invalid geometry must not turn into JSON null or zero');
+});
+
 test('a button saved before initialization survives selection changes, panel restart and repeated preparation', async () => {
   const button = layer(2, 'comm_bt_0001'); const decoration = layer(3, 'comm_sp_0001');
   const panel = await panelHarness([button, decoration]);
@@ -349,6 +679,29 @@ test('a button saved before initialization survives selection changes, panel res
   const reopened = await panelHarness([button], { stored: panel.stored });
   assert.equal(reopened.elements.semantic.value, 'button');
   assert.equal(reopened.writes, 0);
+});
+
+test('a copied PSD keeps component settings and silently receives its own document identity', async () => {
+  const image = layer(2, 'comm_sp_0001');
+  const original = await panelHarness([image]);
+  await original.elements['prepare-document'].dispatch('click');
+  const first = original.stored;
+  const copy = await panelHarness([layer(2, 'comm_sp_0001')], {
+    stored: first, documentPath: 'F:/Art/X选服-提示-一键生成.psd'
+  });
+  const prepared = await copy.sandbox.prepareCurrentDocumentForExport();
+  assert.equal(prepared.bundle.document.name, 'X选服-提示-一键生成');
+  assert.notEqual(prepared.bundle.document.id, first.document.id);
+  assert.equal(copy.stored.document.id, first.document.id, 'preflight remains read only');
+  await copy.elements['prepare-document'].dispatch('click');
+  assert.equal(copy.stored.document.id, prepared.bundle.document.id);
+  assert.notEqual(copy.stored.document.id, first.document.id);
+  assert.equal(copy.stored.document.name, 'X选服-提示-一键生成');
+  assert.equal(copy.stored.document.sourcePath, 'f:/art/x选服-提示-一键生成.psd');
+  assert.deepEqual(copy.stored.nodes['2'], first.nodes['2']);
+  const stableId = copy.stored.document.id;
+  await copy.elements['prepare-document'].dispatch('click');
+  assert.equal(copy.stored.document.id, stableId);
 });
 
 test('panel previews size classification for saved defaults and preserves a manual Image override after reopening', async () => {
@@ -1502,4 +1855,32 @@ test('an existing missing role does not hide another newly deleted role on the s
   assert.deepEqual(panel.stored, fixture.manifest);
   assert.equal(panel.writes, 0);
   assert.deepEqual(panel.host.history, [false]);
+});
+
+test('panel can select, locate, replace and clear a shared nine-slice source across reopen', async () => {
+  const items = [layer(2, 'comm_sp_0031'), layer(3, 'comm_sp_0031')];
+  const h = await panelHarness(items);
+  for (const item of items) {
+    h.host.document.activeLayers = [item];
+    await h.sandbox.refreshAuthoringState();
+    h.elements['image-type'].value = 'sliced';
+    for (const side of ['left', 'top', 'right', 'bottom']) h.elements['slice-' + side].value = '10';
+    await h.elements['apply-preset'].dispatch('click');
+  }
+  await h.elements['shared-slice-set'].dispatch('click');
+  const resource = Object.values(h.stored.resourceRegistry.resources).find(r => r.status === 'active');
+  assert.equal(resource.exportSourceLayerId, '3', h.elements.status.value);
+  const reopened = await panelHarness(items, { stored: h.stored });
+  reopened.host.document.activeLayers = [items[0]];
+  await reopened.sandbox.refreshAuthoringState();
+  assert.match(reopened.elements['shared-slice-status'].textContent, /图层 3/);
+  assert.equal(reopened.elements['shared-slice-panel'].classList.contains('is-hidden'), false);
+  await reopened.elements['shared-slice-locate'].dispatch('click');
+  assert.deepEqual(reopened.host.document.activeLayers.map(item => item.id), [3]);
+  reopened.host.document.activeLayers = [items[0]];
+  await reopened.sandbox.refreshAuthoringState();
+  await reopened.elements['shared-slice-set'].dispatch('click');
+  assert.equal(Object.values(reopened.stored.resourceRegistry.resources).find(r => r.status === 'active').exportSourceLayerId, '2');
+  await reopened.elements['shared-slice-clear'].dispatch('click');
+  assert.equal(Object.values(reopened.stored.resourceRegistry.resources).find(r => r.status === 'active').exportSourceLayerId, undefined);
 });

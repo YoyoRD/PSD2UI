@@ -18,6 +18,7 @@ function harness(t, options = {}) {
   });
   const document = { id: 42, path: path.join(root, '界面.psd'), async save() {
     saveCount += 1;
+    if (options.onSave) options.onSave(saveCount);
     if (saveCount <= (options.failSaveAttempts || 0)) throw new Error('simulated save failure');
   } };
   const sidecar = path.join(root, '界面.psd2ui.authoring.json');
@@ -25,9 +26,15 @@ function harness(t, options = {}) {
   if (options.sidecarDirectory) fs.mkdirSync(sidecar);
   let raw = options.raw || '';
   let saveCount = 0;
+  let metadataRevision = 1;
+  let snapshotRevision = 1;
   const calls = [];
-  const photoshop = { app: { activeDocument: document }, core: { async executeAsModal(callback) {
+  const photoshop = { app: { activeDocument: document }, core: {
+    getMetadataRevision: options.cache ? () => metadataRevision : undefined,
+    getContentToken: options.token ? () => document.id + '|' + document.path + '|' + snapshotRevision : undefined,
+    async executeAsModal(callback) {
     if (options.switchBeforeModal) photoshop.app.activeDocument = { id: 99, path: 'other.psd' };
+    if (options.changeBeforeModal) snapshotRevision++;
     return callback();
   } }, async invoke(method, params) {
     calls.push({ method, params });
@@ -43,9 +50,9 @@ function harness(t, options = {}) {
       assert.equal(params.namespaceUri, 'https://yoyoengine.dev/psd2ui/1.0/');
       assert.equal(params.namespacePrefix, 'yoyoPsd2ui');
       assert.equal(params.propertyName, 'Manifest');
-      if (options.persistWrite !== false) raw = JSON.stringify({ ...raw && JSON.parse(raw), manifest: JSON.parse(params.serializedManifest) });
+      if (options.persistWrite !== false) { raw = JSON.stringify({ ...raw && JSON.parse(raw), manifest: JSON.parse(params.serializedManifest) }); metadataRevision++; }
       if (options.switchAfterWrite) photoshop.app.activeDocument = { id: 99, path: 'other.psd' };
-      return true;
+      return options.receipt ? { verified: options.persistWrite !== false, documentId: document.id, serializedLength: params.serializedManifest.length } : true;
     }
     throw new Error('unknown RPC ' + method);
   } };
@@ -56,6 +63,7 @@ function harness(t, options = {}) {
   } };
   vm.runInNewContext(source, sandbox, { filename: storePath });
   return { api: sandbox.module.exports, document, sidecar, calls,
+    external(value) { raw = JSON.stringify({ manifest: value }); metadataRevision++; },
     raw: () => raw, saveCount: () => saveCount };
 }
 
@@ -118,4 +126,52 @@ test('writeManifestInCurrentModal honors saveDocument false for surrounding auth
   await h.api.writeManifestInCurrentModal({ next: true }, false);
   assert.equal(h.saveCount(), 0);
   assert.deepEqual(JSON.parse(fs.readFileSync(h.sidecar, 'utf8')), { next: true });
+});
+
+test('verified host receipts publish isolated cached manifests without repeated XMP round trips', async t => {
+  const h = harness(t, { cache: true, receipt: true });
+  const manifest = { nodes: { '1': { semantic: 'button' } } };
+  const result = await h.api.writeManifest(manifest, true);
+  assert.equal(result.verifiedManifest, manifest);
+  assert.equal(h.calls.filter(c => c.method === 'readManifest').length, 0);
+  const value = await h.api.readManifest(); value.nodes['1'].semantic = 'text';
+  assert.equal((await h.api.readManifest()).nodes['1'].semantic, 'button');
+  manifest.nodes['1'].semantic = 'image';
+  assert.equal(result.verifiedManifest, null, 'a mutated caller object is no longer the verified value');
+  assert.equal((await h.api.readManifest()).nodes['1'].semantic, 'button', 'the cache must retain the exact persisted bytes');
+  assert.equal(h.calls.filter(c => c.method === 'readManifest').length, 0);
+  h.external({ nodes: { '1': { semantic: 'toggle' } } });
+  assert.equal((await h.api.readManifest()).nodes['1'].semantic, 'toggle');
+  assert.equal(h.calls.filter(c => c.method === 'readManifest').length, 1);
+  await h.api.readManifest(undefined, { fresh: true });
+  assert.equal(h.calls.filter(c => c.method === 'readManifest').length, 2);
+});
+
+test('failed save invalidates acknowledged metadata cache and exposes the restored authoritative XMP', async t => {
+  const h = harness(t, { cache: true, receipt: true, raw: '{"manifest":{"old":true}}', failSaveAttempts: 1 });
+  await h.api.readManifest();
+  await assert.rejects(h.api.writeManifest({ next: true }), /simulated save failure/);
+  assert.deepEqual(JSON.parse(JSON.stringify(await h.api.readManifest())), { old: true });
+});
+
+test('a layer change during the modal wait rejects the stale configuration before any write', async t => {
+  const raw = '{"manifest":{"old":true}}';
+  const h = harness(t, { token: true, changeBeforeModal: true, raw });
+  await assert.rejects(h.api.writeManifest({ next: true }), /PSD 图层已变化/);
+  assert.equal(h.calls.filter(call => ['writeManifest', 'setXmp'].includes(call.method)).length, 0);
+  assert.equal(h.raw(), raw);
+  assert.equal(h.saveCount(), 0);
+  assert.equal(fs.existsSync(h.sidecar), false);
+});
+
+test('a caller mutation during PSD save cannot publish unverified metadata and restores the original bytes', async t => {
+  const manifest = { next: true };
+  const raw = '{"manifest":{"old":true}}';
+  const h = harness(t, { cache: true, receipt: true, raw,
+    onSave(count) { if (count === 1) manifest.next = false; } });
+  await assert.rejects(h.api.writeManifest(manifest), /组件配置已变化/);
+  assert.equal(h.raw(), raw);
+  assert.equal(h.saveCount(), 2);
+  assert.equal(fs.existsSync(h.sidecar), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(await h.api.readManifest())), { old: true });
 });

@@ -100,7 +100,12 @@
             <div class="card-title-row"><h2>图片参数</h2><button type="button" id="reset-image-defaults" class="text-action">恢复默认</button></div>
             <label><span>图片类型</span><select id="image-type"><option value="simple">普通 / Simple</option><option value="sliced">九宫格 / Sliced</option><option value="tiled">平铺 / Tiled</option><option value="filled">填充 / Filled</option></select></label>
             <div id="slice-fields" class="field-grid is-hidden"><label><span>左</span><input id="slice-left" type="number" min="0" step="1" value="0"></label><label><span>上</span><input id="slice-top" type="number" min="0" step="1" value="0"></label><label><span>右</span><input id="slice-right" type="number" min="0" step="1" value="0"></label><label><span>下</span><input id="slice-bottom" type="number" min="0" step="1" value="0"></label></div>
-            <p class="field-help">九宫导出会压缩可拉伸区域，并保留边框参数。</p>
+            <p class="field-help">四边均为 0 时，沿用当前 UIRes 中同名九宫的 PNG 和边距；首次交付请填写实际边距。九宫导出会压缩可拉伸区域。</p>
+            <div id="shared-slice-panel" class="is-hidden">
+              <p id="shared-slice-status" class="field-help">保存九宫设置后，可指定同名资源的共用源图。</p>
+              <div class="actions"><button id="shared-slice-set">将当前图层设为共用源图</button><button id="shared-slice-locate">定位源图</button><button id="shared-slice-clear">取消共用源图</button></div>
+              <p class="field-help">此源图只在当前 PSD 内生效。先保存当前图层的九宫设置，再指定源图；同名图层共用它的像素和边距，各自保留位置、尺寸及显隐。</p>
+            </div>
           </div>
         </div>
         <div id="options-text" class="semantic-options is-hidden"><div class="field-card"><div class="card-title-row"><h2>文本参数</h2><button type="button" id="reset-text-defaults" class="text-action">恢复默认</button></div><label><span>字体键</span><input id="font-key" value="default"></label><p class="field-help">内容、字号、颜色和排版直接从 Photoshop 读取。</p></div></div>
@@ -139,7 +144,7 @@
         <div id="internal-settings-panel" class="is-hidden">
           <p class="field-help">以下入口用于兼容既有文档。已有配置时初始化只同步，不重置组件。</p>
           <div class="button-grid"><button type="button" id="load-manifest">重新读取配置</button><button type="button" id="sync-layer-tree">同步图层树到配置</button></div>
-          <div class="field-card"><label><span>界面名称</span><input id="document-name"></label><div class="button-grid"><button type="button" id="read-document-name">读取 PSD 名称</button><button type="button" id="use-layer-name">使用选中名称</button><button type="button" id="clear-document-name">清空</button></div><label><span>内部 submodule</span><input id="document-submodule"></label><button type="button" id="normalize-submodule">规范 submodule</button><div class="action-stack"><button type="button" id="initialize-document">使用所选根初始化</button><button type="button" id="set-submodule">更新 submodule</button></div></div>
+          <div class="field-card"><label><span>界面名称（跟随 PSD 文件名）</span><input id="document-name" readonly></label><label><span>内部 submodule</span><input id="document-submodule"></label><button type="button" id="normalize-submodule">规范 submodule</button><div class="action-stack"><button type="button" id="initialize-document">使用所选根初始化</button><button type="button" id="set-submodule">更新 submodule</button></div></div>
           <div class="field-card"><strong id="resource-summary">尚未读取资源身份</strong><button type="button" id="inspect-resource">读取选中资源</button><button type="button" id="allocate-resource">分配资源</button><label><span>复用资源 ID</span><input id="reuse-resource-id"></label><button type="button" id="reuse-resource">绑定复用资源</button></div>
           <label class="check-row"><input id="advanced-resource-toggle" type="checkbox"><span>显示资源迁移维护</span></label>
           <div id="advanced-resource-panel" class="advanced-panel is-hidden"><button type="button" id="promote-common">提升为 Common</button><label><span>目标 module</span><input id="migration-module"></label><label><span>目标 submodule</span><input id="migration-submodule"></label><label><span>类型</span><select id="migration-kind"><option value="sprite">精灵 / Sprite</option><option value="texture">纹理 / Texture</option></select></label><div class="button-grid"><button type="button" id="migrate-resource">迁移资源</button><button type="button" id="retire-resource">停用资源</button></div></div>

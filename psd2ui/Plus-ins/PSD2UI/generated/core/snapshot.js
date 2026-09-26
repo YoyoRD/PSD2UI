@@ -152,9 +152,16 @@ function applyPhotoshopOwnedValues(node, layer) {
   if (node.semantic !== 'text' || !node.text) return;
   if (!layer.text) {
     delete node.text.layoutMode;
+    delete node.text.renderValue;
+    delete node.text.fontPostScriptName;
     return;
   }
   if (typeof layer.text.value === 'string') node.text.value = layer.text.value;
+  if (typeof layer.text.renderValue === 'string') node.text.renderValue = layer.text.renderValue;
+  else delete node.text.renderValue;
+  if (typeof layer.text.fontPostScriptName === 'string' && layer.text.fontPostScriptName.trim()) {
+    node.text.fontPostScriptName = layer.text.fontPostScriptName.trim();
+  } else delete node.text.fontPostScriptName;
   if (Number.isFinite(Number(layer.text.fontSize)) && Number(layer.text.fontSize) > 0) {
     node.text.fontSize = Math.max(1, Math.round(Number(layer.text.fontSize)));
   }
@@ -390,6 +397,14 @@ function prepareManifestForExport(currentManifest, snapshot, options) {
     if (!runtimeLayerIds.has(String(layerId))) return;
     const layer = topology.layersById[String(layerId)];
     const layerKind = normalizeLayerKind(layer);
+    if (layer.text && layer.text.renderWarning) diagnostics.push({
+      severity: 'warning', code: 'PSD2UI_TEXT_RENDER_VALUE_SKIPPED', nodeId: node.id || '',
+      message: `文字 '${node.name || layer.name}'：${layer.text.renderWarning}`
+    });
+    if (layer.text && layer.text.fontWarning) diagnostics.push({
+      severity: 'warning', code: 'PSD2UI_TEXT_FONT_UNRESOLVED', nodeId: node.id || '',
+      message: `文字 '${node.name || layer.name}'：${layer.text.fontWarning}`
+    });
     if (node.visualStates) {
       try {
         if (!isGroupLayer(layer)) fail('PSD2UI_VISUAL_STATE_ROOT_INVALID', '视觉状态只能配置在 Photoshop 组上。');
@@ -622,6 +637,8 @@ function normalizedLayerState(layer) {
   if (layer.text) {
     state.text = {
       value: String(layer.text.value || ''),
+      renderValue: String(layer.text.renderValue || ''),
+      fontPostScriptName: String(layer.text.fontPostScriptName || ''),
       fontSize: number(layer.text.fontSize, 0),
       alignment: String(layer.text.alignment || ''),
       lineSpacing: number(layer.text.lineSpacing, 0),

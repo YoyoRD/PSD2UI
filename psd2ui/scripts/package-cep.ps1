@@ -16,6 +16,8 @@ $taskSigningRoot = Join-Path $taskToolRoot '.tmp/cep-signing'
 $taskStagingRoot = Join-Path $taskToolRoot '.tmp/cep-packaging'
 $taskExtensionId = 'com.yoyoengine.psd2ui.cep'
 $taskInstallerRevision = 2
+$taskVersionFile = 'PSD2UI-CEP.version.json'
+$taskOwnedNames = @($taskExtensionId, 'Install.cmd', 'Install.ps1', 'README.md', 'SIGNATURE.txt', 'package-files.json', $taskVersionFile)
 $taskToolUrl = 'https://raw.githubusercontent.com/Adobe-CEP/CEP-Resources/master/ZXPSignCMD/4.1.3/x64/ZXPSignCmd.exe'
 $taskToolSha256 = 'FFC2223167225CE61D024EB463FC5AD1A1BE16133F99EF334A646F7311916C98'
 
@@ -60,6 +62,9 @@ function Invoke-TaskSigning([string[]]$Arguments) {
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $taskToolRoot 'dist' }
 $taskOutputRoot = [IO.Path]::GetFullPath($OutputDirectory)
 [IO.Directory]::CreateDirectory($taskOutputRoot) | Out-Null
+if (((Get-Item -LiteralPath $taskOutputRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "The output directory cannot be a reparse point: $taskOutputRoot"
+}
 if (-not $SigningTool) {
     $SigningTool = Join-Path $taskSigningRoot 'ZXPSignCmd.exe'
     if (-not (Test-Path -LiteralPath $SigningTool -PathType Leaf)) {
@@ -83,6 +88,9 @@ if (-not $SkipBuild) {
 $taskPlainPassword = $null
 $taskPasswordPointer = [IntPtr]::Zero
 $taskWork = Assert-TaskChild (Join-Path $taskStagingRoot ([Guid]::NewGuid().ToString('N'))) $taskStagingRoot
+$taskPublishStage = $null
+$taskPublishBackup = $null
+$taskPreservePublicationArtifacts = $false
 [IO.Directory]::CreateDirectory($taskWork) | Out-Null
 try {
     if (-not $CertificatePath) {
@@ -148,25 +156,77 @@ try {
         "Windows ZXPSignCmd 4.1.3 verification. No timestamp was requested.`r`nCertificate expires; re-sign before expiry.`r`n`r`nZXP:`r`n" +
         ($taskSignature -join "`r`n") + "`r`n`r`nDeployed folder:`r`n" + ($taskDeployedSignature -join "`r`n"))
     & (Join-Path $taskInstallRoot 'Install.ps1') -DestinationRoot (Join-Path $taskWork 'check-destination') -ValidateOnly | Out-Null
-    $taskZip = Join-Path $taskWork ($taskNameBase + '-Install-r' + $taskInstallerRevision + '.zip')
-    [IO.Compression.ZipFile]::CreateFromDirectory($taskInstallRoot, $taskZip, [IO.Compression.CompressionLevel]::Optimal, $false)
-    $taskZipCheck = Join-Path $taskWork 'zip-check'
-    [IO.Compression.ZipFile]::ExtractToDirectory($taskZip, $taskZipCheck)
-    Invoke-TaskSigning @('-verify', (Join-Path $taskZipCheck $taskExtensionId), '-skipOnlineRevocationChecks') | Out-Null
-    & (Join-Path $taskZipCheck 'Install.ps1') -DestinationRoot (Join-Path $taskWork 'check-destination') -ValidateOnly | Out-Null
-    $taskOutputZxp = Join-Path $taskOutputRoot ($taskNameBase + '-r' + $taskInstallerRevision + '.zxp')
-    $taskOutputZip = Join-Path $taskOutputRoot ($taskNameBase + '-Install-r' + $taskInstallerRevision + '.zip')
-    Copy-Item -LiteralPath $taskZxp -Destination $taskOutputZxp -Force
-    Copy-Item -LiteralPath $taskZip -Destination $taskOutputZip -Force
+    $taskExistingVersionPath = Assert-TaskChild (Join-Path $taskOutputRoot $taskVersionFile) $taskOutputRoot
+    $taskHasExistingFiles = @($taskOwnedNames | Where-Object { Test-Path -LiteralPath (Join-Path $taskOutputRoot $_) }).Count -gt 0
+    if ($taskHasExistingFiles) {
+        if (-not (Test-Path -LiteralPath $taskExistingVersionPath -PathType Leaf)) {
+            throw "Output contains installer filenames without $taskVersionFile; refusing to replace files of unknown ownership: $taskOutputRoot"
+        }
+        if (((Get-Item -LiteralPath $taskExistingVersionPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The existing version file cannot be a reparse point: $taskExistingVersionPath"
+        }
+        $taskExistingVersion = Get-Content -LiteralPath $taskExistingVersionPath -Raw | ConvertFrom-Json
+        if ($taskExistingVersion.extensionId -ne $taskExtensionId) {
+            throw "The existing version file does not belong to $taskExtensionId`: $taskExistingVersionPath"
+        }
+    }
+    $taskPublishStage = Assert-TaskChild (Join-Path $taskOutputRoot ('.psd2ui-staging-' + [Guid]::NewGuid().ToString('N'))) $taskOutputRoot
+    $taskPublishBackup = Assert-TaskChild (Join-Path $taskOutputRoot ('.psd2ui-backup-' + [Guid]::NewGuid().ToString('N'))) $taskOutputRoot
+    Copy-Item -LiteralPath $taskInstallRoot -Destination $taskPublishStage -Recurse
+    Assert-TaskNoLinks $taskPublishStage
+    Invoke-TaskSigning @('-verify', (Join-Path $taskPublishStage $taskExtensionId), '-skipOnlineRevocationChecks') | Out-Null
+    & (Join-Path $taskPublishStage 'Install.ps1') -DestinationRoot (Join-Path $taskWork 'check-destination') -ValidateOnly | Out-Null
     $taskReport = [ordered]@{ extensionId = $taskExtensionId; version = $taskVersion; installerRevision = $taskInstallerRevision; createdAtUtc = [DateTime]::UtcNow.ToString('o');
         signingTool = $taskToolUrl; timestamped = $false; signatureVerified = $true;
-        zip = $taskOutputZip; zxp = $taskOutputZxp; zipSha256 = (Get-TaskSha256 $taskOutputZip);
-        zxpSha256 = (Get-TaskSha256 $taskOutputZxp); runtimeFiles = $taskEntries.Count }
-    Write-TaskUtf8 (Join-Path $taskOutputRoot ($taskNameBase + '-package-r' + $taskInstallerRevision + '.json')) ($taskReport | ConvertTo-Json -Depth 6)
+        directory = $taskOutputRoot; runtimeFiles = $taskEntries.Count }
+    Write-TaskUtf8 (Join-Path $taskPublishStage $taskVersionFile) ($taskReport | ConvertTo-Json -Depth 6)
+
+    [IO.Directory]::CreateDirectory($taskPublishBackup) | Out-Null
+    $taskBackedUpNames = New-Object 'System.Collections.Generic.List[string]'
+    $taskPublishedNames = New-Object 'System.Collections.Generic.List[string]'
+    try {
+        foreach ($taskName in $taskOwnedNames) {
+            $taskExistingPath = Assert-TaskChild (Join-Path $taskOutputRoot $taskName) $taskOutputRoot
+            if (Test-Path -LiteralPath $taskExistingPath) {
+                Assert-TaskNoLinks $taskExistingPath
+                Move-Item -LiteralPath $taskExistingPath -Destination (Join-Path $taskPublishBackup $taskName)
+                $taskBackedUpNames.Add($taskName)
+            }
+        }
+        foreach ($taskName in $taskOwnedNames) {
+            $taskPublishedPath = Assert-TaskChild (Join-Path $taskOutputRoot $taskName) $taskOutputRoot
+            Move-Item -LiteralPath (Join-Path $taskPublishStage $taskName) -Destination $taskPublishedPath
+            $taskPublishedNames.Add($taskName)
+        }
+    } catch {
+        $taskPublishError = $_
+        try {
+            foreach ($taskName in $taskPublishedNames) {
+                Move-Item -LiteralPath (Join-Path $taskOutputRoot $taskName) -Destination (Join-Path $taskPublishStage $taskName)
+            }
+            foreach ($taskName in $taskBackedUpNames) {
+                Move-Item -LiteralPath (Join-Path $taskPublishBackup $taskName) -Destination (Join-Path $taskOutputRoot $taskName)
+            }
+        } catch {
+            $taskPreservePublicationArtifacts = $true
+            throw "Publishing failed and rollback needs manual review. Stage: $taskPublishStage; backup: $taskPublishBackup; publish error: $taskPublishError; rollback error: $_"
+        }
+        throw $taskPublishError
+    }
     $taskReport | ConvertTo-Json -Depth 6
 } finally {
     if ($taskPasswordPointer -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($taskPasswordPointer) }
     $taskPlainPassword = $null
+    if (-not $taskPreservePublicationArtifacts -and $taskPublishStage -and (Test-Path -LiteralPath $taskPublishStage)) {
+        $null = Assert-TaskChild $taskPublishStage $taskOutputRoot
+        Assert-TaskNoLinks $taskPublishStage
+        Remove-Item -LiteralPath $taskPublishStage -Recurse -Force
+    }
+    if (-not $taskPreservePublicationArtifacts -and $taskPublishBackup -and (Test-Path -LiteralPath $taskPublishBackup)) {
+        $null = Assert-TaskChild $taskPublishBackup $taskOutputRoot
+        Assert-TaskNoLinks $taskPublishBackup
+        Remove-Item -LiteralPath $taskPublishBackup -Recurse -Force
+    }
     if (Test-Path -LiteralPath $taskWork) {
         $null = Assert-TaskChild $taskWork $taskStagingRoot
         Assert-TaskNoLinks $taskWork

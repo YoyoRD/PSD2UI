@@ -163,7 +163,34 @@ function sameResourceSettings(left, right) {
     key => Number(left.sliceBorder && left.sliceBorder[key] || 0) === Number(right.sliceBorder && right.sliceBorder[key] || 0));
 }
 
-async function assertBundleOwnership(folder, bundle) {
+const sliceBorderKeys = ['left', 'top', 'right', 'bottom'];
+
+function inheritedSliceRequested(resource) {
+  return resource.kind === 'sprite' && resource.sliceBorder
+    && sliceBorderKeys.every(key => resource.sliceBorder[key] === 0);
+}
+
+function concreteSliceBorder(value) {
+  if (!value || typeof value !== 'object') return null;
+  const border = {};
+  for (const key of sliceBorderKeys) {
+    if (!Number.isInteger(value[key]) || value[key] < 0) return null;
+    border[key] = value[key];
+  }
+  return sliceBorderKeys.some(key => border[key] > 0) ? border : null;
+}
+
+function setBundleSliceBorder(bundle, resource, border) {
+  resource.sliceBorder = { ...border };
+  function visit(node) {
+    if (!node) return;
+    if (node.image && node.image.resourceId === resource.id) node.image.sliceBorder = { ...border };
+    (node.children || []).forEach(visit);
+  }
+  visit(bundle.root);
+}
+
+async function assertBundleOwnership(folder, bundle, inheritedResourceFiles = new Map()) {
   assertBundleOutputNames(bundle);
   const jsonName = `${bundle.document.name}.psd2ui.json`;
   const directories = { sprite: await childFolder(folder, 'sprite'), texture: await childFolder(folder, 'texture'),
@@ -207,11 +234,40 @@ async function assertBundleOwnership(folder, bundle) {
     }
     records.push({ existing, entry, legacy, sameDocument });
   }
+  records.sort((left, right) => left.entry.nativePath.localeCompare(right.entry.nativePath));
   const checks = new Map();
+  const warnings = [];
+  const inheritedFiles = new Map(inheritedResourceFiles);
   for (const resource of bundle.resources) {
     const target = await childFile(await relativeFolder(folder, resourceDirectory(resource)), resource.fileName);
     const comparisons = new Map();
     let ownsTarget = false;
+    if (inheritedSliceRequested(resource)) {
+      let border = null;
+      let sourceFile = null;
+      for (const record of records) {
+        const prior = record.existing.resources.find(value => value && value.kind === 'sprite'
+          && String(value.fileName).toLowerCase() === resource.fileName.toLowerCase());
+        if (!prior) continue;
+        const priorFile = await existingResourceFile(folder, prior, record.legacy);
+        if (!priorFile) continue;
+        const candidate = concreteSliceBorder(prior.sliceBorder);
+        if (!candidate) continue;
+        if (border && !sameResourceSettings({ kind: 'sprite', sliceBorder: border }, prior)) {
+          throw resourceIssue('PSD2UI_RESOURCE_SETTINGS_CONFLICT',
+            `公共九宫 '${resource.fileName}' 的既有导出记录使用了不同边距，无法确定继承值。`, resource);
+        }
+        border = candidate;
+        sourceFile = priorFile;
+      }
+      if (!border) throw resourceIssue('PSD2UI_SHARED_SLICE_INHERIT_UNAVAILABLE',
+        `九宫 '${resource.fileName}' 的四边均为 0，但当前 UIRes 没有可继承的同名 PNG 与有效九宫记录；首次交付请填写实际边距。`, resource);
+      setBundleSliceBorder(bundle, resource, border);
+      inheritedFiles.set(resource.id, target || sourceFile);
+      warnings.push({ severity: 'warning', code: 'PSD2UI_SHARED_SLICE_INHERITED',
+        message: `公共九宫 '${resource.fileName}' 已沿用 UIRes 的边距 ${border.left}/${border.top}/${border.right}/${border.bottom} 和已有 PNG。`,
+        resourceId: resource.id, sourceLayerId: resource.sourceLayerId });
+    }
     for (const record of records) {
       const prior = record.existing.resources.find(value => value && value.kind === resource.kind
         && String(value.fileName).toLowerCase() === resource.fileName.toLowerCase());
@@ -223,16 +279,20 @@ async function assertBundleOwnership(folder, bundle) {
       }
       if (!sameResourceSettings(resource, prior)) throw resourceIssue('PSD2UI_RESOURCE_SETTINGS_CONFLICT',
         `公共图片 '${resource.fileName}' 与 '${record.entry.name}' 的九宫边框设置不同，无法共享同一 Unity 资源。`, resource);
-      if (!priorFile) throw resourceIssue('PSD2UI_SHARED_RESOURCE_MISSING',
-        `'${record.entry.name}' 引用的公共图片 '${resource.fileName}' 不存在，无法比较图片内容。`, resource);
+      if (!priorFile) {
+        warnings.push({ severity: 'warning', code: 'PSD2UI_SHARED_RESOURCE_MISSING',
+          message: `'${record.entry.name}' 引用的公共图片 '${resource.fileName}' 已缺失；将使用当前可用图片继续导出。`,
+          resourceId: resource.id, sourceLayerId: resource.sourceLayerId });
+        continue;
+      }
       comparisons.set(priorFile.nativePath, { file: priorFile, owner: record.entry.name });
     }
-    // 自己独占的资源可以正常迭代；共享资源和已有的无归属图片必须先比像素。
-    if (target && (!ownsTarget || comparisons.size)) comparisons.set(target.nativePath,
+    // 自己独占的资源可以正常迭代；共享和无归属的同名图复用 UIRes 已有文件。
+    if (target && (inheritedFiles.has(resource.id) || !ownsTarget || comparisons.size)) comparisons.set(target.nativePath,
       comparisons.get(target.nativePath) || { file: target, owner: '已有输出图片' });
     checks.set(resource.id, { comparisons: Array.from(comparisons.values()), target });
   }
-  return { checks, legacyJson, signature: JSON.stringify({
+  return { checks, legacyJson, warnings, inheritedFiles, signature: JSON.stringify({
     records: records.map(record => [record.entry.nativePath, record.existing]).sort((a, b) => a[0].localeCompare(b[0])),
     targets: Array.from(checks, ([id, check]) => [id, check.target && check.target.nativePath,
       check.comparisons.map(value => value.file.nativePath)])
@@ -244,33 +304,62 @@ async function preflightExport(folder, bundle, sourceDocument) {
   assertBundleOutputNames(bundle);
   if (!sourceDocument) throw new Error('当前没有打开的 Photoshop 文档。');
   const referencedSources = new Map();
+  const sourceNodes = new Map();
+  const warnings = [];
   function visit(node) {
     if (!node) return;
     [node.image && node.image.resourceId, node.rawImage && node.rawImage.resourceId].filter(Boolean).forEach((id) => {
       if (!referencedSources.has(id)) referencedSources.set(id, new Set());
       referencedSources.get(id).add(String(node.sourceLayerId));
+      sourceNodes.set(id + ':' + String(node.sourceLayerId), node);
     });
     (node.children || []).forEach(visit);
   }
   visit(bundle.root);
   for (const resource of bundle.resources) {
     const ids = bundle.schemaVersion === '1.5.0' ? resource.sourceLayerIds : [String(resource.sourceLayerId)];
+    if (resource.exportSourceLayerId != null && (bundle.schemaVersion !== '1.5.0'
+        || resource.kind !== 'sprite' || !resource.sliceBorder
+        || resource.sourceLayerId !== resource.exportSourceLayerId || !ids.includes(resource.exportSourceLayerId))) {
+      throw resourceIssue('PSD2UI_SHARED_SLICE_SOURCE_INVALID', `共用九宫 '${resource.fileName}' 的指定源图无效。`, resource);
+    }
     if (bundle.schemaVersion === '1.5.0') {
       const expected = referencedSources.get(resource.id) || new Set();
       if (expected.size !== ids.length || ids.some((id) => !expected.has(id))) {
-        throw new Error(`[PSD2UI_RESOURCE_SOURCES_INVALID] '${resource.fileName}' 的像素校验来源与节点引用不一致。`);
+        throw new Error(`[PSD2UI_RESOURCE_SOURCES_INVALID] '${resource.fileName}' 的资源来源与节点引用不一致。`);
       }
     }
+    let expectedSize = null;
     ids.forEach((id) => {
       const layer = findLayerById(sourceDocument.layers || [], id);
       if (!layer) throw new Error(`[PSD2UI_RESOURCE_SOURCE_MISSING] 资源 '${resource.fileName}' 的源图层 ${id} 不存在。`);
       if (bundle.schemaVersion === '1.5.0' && parseResourceLayerName(layer.name, id).fileName !== resource.fileName) {
         throw new Error(`[PSD2UI_SOURCE_NAME_CHANGED] 图片图层 ${id} '${layer.name}' 已变更，请重新检查后导出。`);
       }
+      if (resource.exportSourceLayerId != null) return;
+      const node = sourceNodes.get(resource.id + ':' + id);
+      const width = node && node.rect ? Number(node.rect.width) : asNumber(layer.bounds.right) - asNumber(layer.bounds.left);
+      const height = node && node.rect ? Number(node.rect.height) : asNumber(layer.bounds.bottom) - asNumber(layer.bounds.top);
+      const size = resource.sliceBorder ? {
+        width: Number(resource.sliceBorder.left) + 1 + Number(resource.sliceBorder.right),
+        height: Number(resource.sliceBorder.top) + 1 + Number(resource.sliceBorder.bottom)
+      } : { width, height };
+      if (![size.width, size.height].every(value => Number.isFinite(value) && value > 0)) {
+        throw resourceIssue('PSD2UI_RESOURCE_SIZE_INVALID', `图片 '${resource.fileName}' 的图层 ${id} 缺少有效宽高。`, resource);
+      }
+      if (expectedSize && (size.width !== expectedSize.width || size.height !== expectedSize.height)) {
+        warnings.push({ severity: 'warning', code: 'PSD2UI_RESOURCE_SIZE_REUSED',
+          message: `同名图片 '${resource.fileName}' 的图层 ${expectedSize.layerId} 为 ${expectedSize.width}×${expectedSize.height}，`
+            + `图层 ${id} 为 ${size.width}×${size.height}；共用一张 PNG，各节点保留自己的布局尺寸。`
+            + (size.width * expectedSize.height === size.height * expectedSize.width ? '' : '宽高比不同，请核对显示效果。'),
+          resourceId: resource.id, sourceLayerId: id });
+      }
+      if (!expectedSize) expectedSize = { ...size, layerId: id };
     });
   }
-  await assertBundleOwnership(folder, bundle);
-  return { status: 'ready', resourceCount: bundle.resources.length };
+  const ownership = await assertBundleOwnership(folder, bundle);
+  return { status: 'ready', resourceCount: bundle.resources.length,
+    warnings: warnings.concat(ownership.warnings), inheritedFiles: ownership.inheritedFiles };
 }
 
 async function closeWithoutSaving(document) {
@@ -434,7 +523,14 @@ function pixelsEqual(left, right) {
 }
 
 // 只打开临时副本，避免关闭美术已打开的同名 PNG。
-async function readPngPixels(file) {
+async function readPngSize(file) {
+  if (typeof core.readPngSize === 'function') {
+    const size = await core.readPngSize(file);
+    if (!size || ![size.width, size.height].every(value => Number.isInteger(value) && value > 0)) {
+      throw new Error('[PSD2UI_PNG_SIZE_INVALID] PNG 宽高读回无效。');
+    }
+    return { width: size.width, height: size.height };
+  }
   const previous = app.activeDocument;
   const openIds = new Set(Array.from(app.documents || []).map(document => String(document.id)));
   let opened;
@@ -442,7 +538,7 @@ async function readPngPixels(file) {
     await app.open(file);
     opened = app.activeDocument;
     if (!opened || openIds.has(String(opened.id))) throw new Error('读取 PNG 时未创建独立临时文档。');
-    return await capturePixels(opened);
+    return { width: Math.round(asNumber(opened.width)), height: Math.round(asNumber(opened.height)) };
   } finally {
     if (opened && !openIds.has(String(opened.id))) await closeWithoutSaving(opened);
     if (previous && findOpenDocument(previous.id)) app.activeDocument = previous;
@@ -458,6 +554,13 @@ async function exportResourcePng(
   let sourceDocument = requireOpenDocument(sourceDocumentId, '资源源');
   let layer = findLayerById(sourceDocument.layers || [], sourceLayerId);
   if (!layer) throw new Error(`资源源图层 ${sourceLayerId} 不存在。`);
+  // CEP 在一次宿主调用中完成普通 PNG 的临时工作台，避免中间步骤反复同步全树。
+  // 九宫与像素验证仍使用共享实现；已开始的导出失败不能重放到旧通路。
+  if (!sliceBorder && !verifyPixels && typeof core.exportLayerPng === 'function') {
+    await core.exportLayerPng({ documentId: sourceDocument.id, layerId: layer.id,
+      path: outputFile.nativePath, compression: 6 });
+    return null;
+  }
   const sourceWidth = asNumber(sourceDocument.width);
   const sourceHeight = asNumber(sourceDocument.height);
   const sourceBounds = layer.bounds;
@@ -483,6 +586,8 @@ async function exportResourcePng(
       : await layer.duplicate(requireOpenDocument(workbenchId, '资源工作台'), placement);
     // 隐藏状态仍需导出完整图片；visible 属于最终节点外观，不是跳过资源的依据。
     copied.visible = true;
+    // 节点不透明度已写入 JSON；资源只保留图片自身的 alpha，避免重复烘焙。
+    if (Number(copied.opacity) !== 100) copied.opacity = 100;
     app.activeDocument = requireOpenDocument(workbenchId, '资源工作台');
     await copied.translate(-asNumber(sourceBounds.left), -asNumber(sourceBounds.top));
     const liveWorkbench = requireOpenDocument(workbenchId, '资源工作台');
@@ -628,9 +733,12 @@ function sameBytes(left, right) {
 async function writeBundleUnlocked(bundle, options) {
   const sourceDocument = app.activeDocument;
   if (!sourceDocument) throw new Error('当前没有打开的 Photoshop 文档。');
+  const sourceCheckpoint = typeof core.getExportSourceCheckpoint === 'function'
+    ? core.getExportSourceCheckpoint(sourceDocument.id) : null;
   const sourceDocumentPath = String(sourceDocument.path || '');
   const folder = await resolveUiResFolder(options);
-  await preflightExport(folder, bundle, sourceDocument);
+  const preflight = await preflightExport(folder, bundle, sourceDocument);
+  const warnings = preflight.warnings;
   const temporaryRoot = await storage.localFileSystem.getTemporaryFolder();
   const transactionFolder = await temporaryRoot.createFolder(`psd2ui-export-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   const stage = await transactionFolder.createFolder('staged');
@@ -638,6 +746,7 @@ async function writeBundleUnlocked(bundle, options) {
   const files = [];
   const stagedResources = new Map();
   let reusedResourceCount = 0;
+  const sourceReuse = [];
   let checkedOwnership;
   const checkedFiles = new Map();
   let preserveBackup = false;
@@ -652,28 +761,24 @@ async function writeBundleUnlocked(bundle, options) {
       await core.executeAsModal(async () => {
         for (let index = 0; index < bundle.resources.length; index += 1) {
           const resource = bundle.resources[index];
-          const sourceIds = bundle.schemaVersion === '1.5.0'
-            ? resource.sourceLayerIds : [String(resource.sourceLayerId)];
-          let referencePixels = null;
-          for (let candidateIndex = 0; candidateIndex < sourceIds.length; candidateIndex += 1) {
-            const liveSourceDocument = requireOpenDocument(sourceDocumentId, '导出源');
-            const layer = findLayerById(liveSourceDocument.layers || [], sourceIds[candidateIndex]);
-            if (!layer) throw new Error(`资源 ${resource.fileName} 的源图层 ${sourceIds[candidateIndex]} 不存在。`);
-            const file = await stage.createFile(candidateIndex === 0
-              ? resource.fileName : `verify-${index}-${candidateIndex}.png`, { overwrite: false });
-            await exportResourcePng(sourceDocumentId, String(layer.id), file, resource.sliceBorder, false);
-            const pixels = sourceIds.length > 1 ? await readPngPixels(file) : null;
-            if (candidateIndex === 0) {
-              referencePixels = pixels;
-              stagedResources.set(resource.id, file);
-            } else if (!pixelsEqual(referencePixels, pixels)) {
-              throw resourceIssue('PSD2UI_RESOURCE_CONTENT_CONFLICT', `同名图片 '${resource.fileName}' 的实际像素不同：`
-                + `图层 ${sourceIds[0]} 与 ${sourceIds[candidateIndex]}。输出目录尚未写入。`, resource);
-            }
+          const inheritedFile = preflight.inheritedFiles.get(resource.id);
+          if (inheritedFile) {
+            stagedResources.set(resource.id, await inheritedFile.copyTo(stage, { overwrite: false }));
+            continue;
           }
+          const representativeId = String(resource.exportSourceLayerId == null ? resource.sourceLayerId : resource.exportSourceLayerId);
+          const liveSourceDocument = requireOpenDocument(sourceDocumentId, '导出源');
+          const layer = findLayerById(liveSourceDocument.layers || [], representativeId);
+          if (!layer) throw new Error(`资源 ${resource.fileName} 的源图层 ${representativeId} 不存在。`);
+          const file = await stage.createFile(resource.fileName, { overwrite: false });
+          await exportResourcePng(sourceDocumentId, representativeId, file, resource.sliceBorder, false);
+          stagedResources.set(resource.id, file);
+          const reusedLayerIds = (resource.sourceLayerIds || []).filter(id => String(id) !== representativeId);
+          if (reusedLayerIds.length) sourceReuse.push({ resourceId: resource.id, fileName: resource.fileName,
+            sourceLayerId: representativeId, reusedLayerIds });
         }
-        // 用生成后的 PNG 与现有 PNG 比较，避免压缩、元数据或九宫收缩影响判断。
-        const ownership = await assertBundleOwnership(folder, bundle);
+        // 同名资源复用已有文件；PSD 图层尺寸只决定各自的布局。
+        const ownership = await assertBundleOwnership(folder, bundle, preflight.inheritedFiles);
         checkedOwnership = ownership.signature;
         for (let index = 0; index < bundle.resources.length; index += 1) {
           const resource = bundle.resources[index];
@@ -681,7 +786,7 @@ async function writeBundleUnlocked(bundle, options) {
           const check = ownership.checks.get(resource.id);
           if (check.target) checkedFiles.set(check.target.nativePath, { file: check.target,
             bytes: await check.target.read({ format: storage.formats.binary }) });
-          const reference = check.comparisons.length ? await readPngPixels(file) : null;
+          const reference = check.comparisons.length ? await readPngSize(file) : null;
           let equalFile = null;
           for (let candidateIndex = 0; candidateIndex < check.comparisons.length; candidateIndex += 1) {
             const comparison = check.comparisons[candidateIndex];
@@ -689,16 +794,34 @@ async function writeBundleUnlocked(bundle, options) {
             const copy = await comparison.file.copyTo(comparisonFolder, { overwrite: false });
             checkedFiles.set(comparison.file.nativePath, { file: comparison.file,
               bytes: await copy.read({ format: storage.formats.binary }) });
-            if (!pixelsEqual(reference, await readPngPixels(copy))) throw resourceIssue('PSD2UI_RESOURCE_CONTENT_CONFLICT',
-              `公共图片 '${resource.fileName}' 与 '${comparison.owner}' 的现有 PNG 尺寸或像素不同。`
-              + `当前来源图层：${resource.sourceLayerIds || resource.sourceLayerId}；已有图片：${comparison.file.nativePath}。输出目录尚未写入。`, resource);
-            equalFile = copy;
+            const size = await readPngSize(copy);
+            if (reference.width !== size.width || reference.height !== size.height) {
+              warnings.push({ severity: 'warning', code: 'PSD2UI_RESOURCE_SIZE_REUSED',
+                message: `公共图片 '${resource.fileName}' 的当前导出尺寸 ${reference.width}×${reference.height} 与已有 PNG `
+                  + `${size.width}×${size.height} 不同；保留已有图片 ${comparison.file.nativePath}，各节点使用自己的布局尺寸。`
+                  + (reference.width * size.height === reference.height * size.width ? '' : '宽高比不同，请核对显示效果。'),
+                resourceId: resource.id, sourceLayerId: resource.sourceLayerId });
+            }
+            if (!equalFile) equalFile = copy;
+            let reuse = sourceReuse.find(entry => entry.resourceId === resource.id);
+            if (!reuse) {
+              reuse = { resourceId: resource.id, fileName: resource.fileName, sourceLayerId: String(resource.sourceLayerId), reusedLayerIds: [] };
+              sourceReuse.push(reuse);
+            }
+            reuse.existingFile = check.target ? check.target.nativePath : comparison.file.nativePath;
           }
           if (equalFile) {
             reusedResourceCount += 1;
             // 已有分类目录资源完全不重写；旧平铺资源保留原编码复制到新目录。
             if (check.target) continue;
             file = equalFile;
+          }
+          if (check.target && (sameBytes(
+            await file.read({ format: storage.formats.binary }),
+            await check.target.read({ format: storage.formats.binary }))
+            || typeof core.samePngContent === 'function' && await core.samePngContent(file, check.target))) {
+            reusedResourceCount += 1;
+            continue;
           }
           files.push({ file, directory: resourceDirectory(resource) });
         }
@@ -711,7 +834,14 @@ async function writeBundleUnlocked(bundle, options) {
         { commandName: 'PSD2UI：关闭图片导出工作台' });
       if (sourceDocumentPath) await openLocalDocument(sourceDocumentPath);
     }
-    if ((await assertBundleOwnership(folder, bundle)).signature !== checkedOwnership) {
+    const jsonFile = await stage.createFile(`${bundle.document.name}.psd2ui.json`, { overwrite: false });
+    const jsonText = JSON.stringify(bundle, null, 2);
+    await jsonFile.write(jsonText, { format: storage.formats.utf8 });
+    const priorJson = await childFile(await childFolder(folder, 'json'), jsonFile.name);
+    const priorJsonText = priorJson && await priorJson.read({ format: storage.formats.utf8 });
+    if (priorJson) checkedFiles.set(priorJson.nativePath, { file: priorJson,
+      bytes: await priorJson.read({ format: storage.formats.binary }) });
+    if ((await assertBundleOwnership(folder, bundle, preflight.inheritedFiles)).signature !== checkedOwnership) {
       throw new Error('[PSD2UI_EXPORT_TARGET_CHANGED] 比较期间输出目录的资源声明发生变化，请重新预检。');
     }
     for (const { file, bytes } of checkedFiles.values()) {
@@ -719,16 +849,24 @@ async function writeBundleUnlocked(bundle, options) {
         throw new Error(`[PSD2UI_EXPORT_TARGET_CHANGED] 比较期间 '${file.nativePath}' 已被修改，请重新预检。`);
       }
     }
-    if (options && options.checkOnly) return { status: 'ready', resourceCount: bundle.resources.length, reusedResourceCount };
-    const jsonFile = await stage.createFile(`${bundle.document.name}.psd2ui.json`, { overwrite: false });
-    await jsonFile.write(JSON.stringify(bundle, null, 2), { format: storage.formats.utf8 });
-    files.push({ file: jsonFile, directory: 'json' });
-    await commitStagedFiles(folder, files, backup, ['sprite', 'texture', 'json']);
+    // CEP 没有原生排他锁；发布前核对整个源的显隐，包含没有历史记录的原生操作。
+    if (sourceCheckpoint != null) await core.verifyExportSourceCheckpoint(sourceDocument.id, sourceCheckpoint);
+    if (options && options.checkOnly) return { status: 'ready', resourceCount: bundle.resources.length,
+      reusedResourceCount, sourceReuse, warnings };
+    if (!priorJson || priorJsonText !== jsonText) {
+      files.push({ file: jsonFile, directory: 'json' });
+    }
+    if (files.length) await commitStagedFiles(folder, files, backup, ['sprite', 'texture', 'json']);
     return { folder: folder.nativePath,
       json: `${folder.nativePath.replace(/[\\/]+$/, '')}/json/${jsonFile.name}`,
-      resourceCount: bundle.resources.length, reusedResourceCount };
+      resourceCount: bundle.resources.length, reusedResourceCount, sourceReuse, warnings };
   } catch (error) {
-    preserveBackup = Boolean(error.preserveExportBackup);
+    preserveBackup = Boolean(error.preserveExportBackup) || error.code === 'CEP_HOST_RESULT_UNKNOWN';
+    if (error.code === 'CEP_HOST_RESULT_UNKNOWN') {
+      // 宿主可能仍在写暂存 PNG；结果未知时既不重放，也不删除正在使用的目录。
+      error.exportTransactionPath = transactionFolder.nativePath;
+      error.message += `\n导出结果待确认，暂存目录已保留：${transactionFolder.nativePath}`;
+    }
     throw error;
   } finally {
     if (!preserveBackup) {

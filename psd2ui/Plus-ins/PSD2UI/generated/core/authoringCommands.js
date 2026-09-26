@@ -18,6 +18,8 @@ const { validateManifest } = require('./validation');
 const { requiresStructure, structureRoleContract, validateStructureLayout, validateVisualStates,
   planStructuredGroup } = require('./structure');
 const { prepareManifestForExport, captureBaseline } = require('./snapshot');
+const { sharedNineSliceSource, sharedNineSliceLayers } = require('./sharedNineSlice');
+const { parseResourceLayerName } = require('./naming');
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -82,6 +84,7 @@ function initializeDocument(input, options) {
     document: {
       id: idFactory('document'),
       name,
+      ...(input.sourcePath ? { sourcePath: String(input.sourcePath).trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() } : {}),
       module: moduleName,
       ...(submodule ? { submodule } : {}),
       width,
@@ -459,6 +462,32 @@ function executeAuthoringCommand(currentManifest, envelope, context, options) {
       case 'reuse-resource':
         value = bindReusedResource(manifest, input);
         break;
+      case 'set-shared-nine-slice-source': {
+        if (manifest.resourceNaming !== 'source') fail('PSD2UI_SOURCE_NAMING_REQUIRED', '共用九宫源图需要使用图片原名资源模式。');
+        const id = normalizeLayerId(input.layerId);
+        const previousRegistry = ensureRegistry(manifest);
+        const selectedLayer = sharedNineSliceLayers(manifest, input.snapshot).layers[id];
+        const previousResource = previousRegistry.resources[previousRegistry.layerBindings[id]]
+          || selectedLayer && Object.values(previousRegistry.resources).find(resource => resource.status === 'active'
+            && resource.fileName === parseResourceLayerName(selectedLayer.name, id).fileName);
+        // 显式换源/取消是失效源的恢复入口；只改命令私有副本，后续校验失败不会丢失原配置。
+        if (previousResource) delete previousResource.exportSourceLayerId;
+        manifest = prepareManifestForExport(manifest, input.snapshot).manifest;
+        const registry = ensureRegistry(manifest);
+        const resource = registry.resources[registry.layerBindings[id]];
+        if (!resource || resource.kind !== 'sprite') fail('PSD2UI_SHARED_SLICE_SOURCE_INVALID', '请选择可导出的 Sprite 图片图层。');
+        if (input.clear === true) {
+          delete resource.exportSourceLayerId;
+        } else {
+          const node = manifest.nodes[id];
+          if (!node.image || node.image.imageType !== 'sliced') fail('PSD2UI_SHARED_SLICE_SOURCE_INVALID', '请先将当前图片设置并保存为九宫格。');
+          resource.exportSourceLayerId = id;
+          const { layers, runtimeIds } = sharedNineSliceLayers(manifest, input.snapshot);
+          sharedNineSliceSource(manifest, resource, layers, runtimeIds);
+        }
+        value = resource;
+        break;
+      }
       case 'retire-resource':
         value = retireResource(manifest, input);
         break;

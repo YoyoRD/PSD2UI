@@ -1,6 +1,9 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param([Parameter(Mandatory=$true)][string]$PackageZip)
+param(
+    [Parameter(Mandatory=$true, ParameterSetName='Directory')][string]$PackageDirectory,
+    [Parameter(Mandatory=$true, ParameterSetName='Zip')][string]$PackageZip
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -31,9 +34,15 @@ function Get-Process {
     return @()
 }
 try {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
     $taskPackage = Join-Path $taskWork 'package'
-    [IO.Compression.ZipFile]::ExtractToDirectory([IO.Path]::GetFullPath($PackageZip), $taskPackage)
+    if ($PSCmdlet.ParameterSetName -eq 'Directory') {
+        $taskSourcePackage = [IO.Path]::GetFullPath($PackageDirectory)
+        if (-not (Test-Path -LiteralPath $taskSourcePackage -PathType Container)) { throw "Installer directory does not exist: $taskSourcePackage" }
+        Copy-Item -LiteralPath $taskSourcePackage -Destination $taskPackage -Recurse
+    } else {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Compression.ZipFile]::ExtractToDirectory([IO.Path]::GetFullPath($PackageZip), $taskPackage)
+    }
     . (Join-Path $taskPackage 'Install.ps1') -LibraryOnly
     $script:Psd2UiInstallLog = Join-Path $taskWork 'installer.log'
     Add-Type -TypeDefinition @'

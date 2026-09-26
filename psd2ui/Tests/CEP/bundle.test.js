@@ -21,7 +21,10 @@ class Element {
   getAttribute(name) { return this.attributes[name] || null; }
 }
 
-test('generated CEP panel boots the real shared UI and exposes a discoverable read-only bridge without a PSD', async () => {
+for (const runtime of [
+  { version: '20.0.4', legacyBuiltins: false },
+  { version: '21.2', legacyBuiltins: true }
+]) test(`generated CEP panel boots Photoshop ${runtime.version} with a discoverable read-only bridge without a PSD`, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'psd2ui-cep-bundle-'));
   const cepRoot = path.resolve(__dirname, '../../Plus-ins/PSD2UI-CEP');
   const elements = {};
@@ -46,7 +49,7 @@ test('generated CEP panel boots the real shared UI and exposes a discoverable re
       const raw = JSON.parse(script.slice('$.PSD2UIHost.dispatch('.length, -1));
       const request = JSON.parse(raw); calls.push(request.method);
       assert.equal(request.deferState, true, 'RPC must not trigger an implicit synchronous tree scan');
-      const state = { activeDocumentId: null, documents: [], version: '20.0.4' };
+      const state = { activeDocumentId: null, documents: [], version: runtime.version };
       const values = { beginState: { token: 'read', stamp: state }, statePage: { items: [], done: true }, probe: state, notificationEvents: [1936483188] };
       assert.ok(values[request.method], 'boot must not mutate or require an open document');
       callback(JSON.stringify({ ok: true, value: values[request.method] }));
@@ -55,6 +58,16 @@ test('generated CEP panel boots the real shared UI and exposes a discoverable re
   sandbox.window = sandbox;
   try {
     vm.createContext(sandbox);
+    if (runtime.legacyBuiltins) {
+      // PS 2020 的 CEP 9.4 使用 Chromium 61 / Node 8.6，不能借用测试宿主的新内建。
+      vm.runInContext(`
+        delete Object.fromEntries; delete Object.hasOwn;
+        delete Array.prototype.flat; delete Array.prototype.flatMap; delete Array.prototype.at;
+        delete String.prototype.replaceAll; delete String.prototype.at;
+        delete Promise.prototype.finally; delete Promise.allSettled; delete Promise.any;
+        delete this.structuredClone; delete this.globalThis;
+      `, sandbox);
+    }
     vm.runInContext(fs.readFileSync(path.join(cepRoot, 'panel.js'), 'utf8'), sandbox);
     for (let count = 0; count < 50 && !events.beforeunload && !errors.length; count++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.deepEqual(errors, []);
@@ -64,12 +77,17 @@ test('generated CEP panel boots the real shared UI and exposes a discoverable re
     assert.match(elements['current-document'].textContent, /没有|未/);
     const sessionDirectory = path.join(directory, '.psd2ui/cep/sessions');
     const status = await invokeCepRunner({ operation: 'status', sessionDirectory });
-    assert.equal(status.photoshopVersion, '20.0.4');
+    assert.equal(status.photoshopVersion, runtime.version);
     assert.equal(status.documentCount, 0);
-    assert.equal(status.pluginVersion, '0.3.8');
+    assert.equal(status.pluginVersion, '0.4.6');
     assert.deepEqual(calls, ['probe', 'beginState', 'statePage', 'notificationEvents']);
     assert.equal(typeof cepEvents['com.adobe.PhotoshopJSONCallbackcom.yoyoengine.psd2ui.cep.panel'], 'function');
     assert.equal(dispatched[0].type, 'com.adobe.PhotoshopRegisterEvent');
+    if (runtime.legacyBuiltins) {
+      assert.equal(vm.runInContext('globalThis === window', sandbox), true);
+      assert.equal(vm.runInContext('Object.fromEntries([["value", 7]]).value', sandbox), 7);
+      assert.equal(vm.runInContext('[1, 2].flatMap(value => [value, value]).join(",")', sandbox), '1,1,2,2');
+    }
   } finally {
     if (events.beforeunload) events.beforeunload();
     await new Promise(setImmediate);

@@ -132,6 +132,35 @@ function createImaging(dependencies) {
   const invoke = config.invoke || function (method, params) { return require('./photoshop').invoke(method, params); };
   const knownProfiles = new Map();
 
+  async function readPngSize(file) {
+    // 尺寸核对不需要在 Photoshop 打开图片；异步解码仍检查 PNG 数据与 CRC。
+    const bytes = BufferType.from(await file.read({ format: storage.formats.binary }));
+    return new Promise((resolve, reject) => {
+      new PNG().parse(bytes, (error, png) => {
+        if (error) reject(error);
+        else resolve({ width: png.width, height: png.height });
+      });
+    });
+  }
+
+  async function samePngContent(first, second) {
+    const firstBytes = BufferType.from(await first.read({ format: storage.formats.binary }));
+    const secondBytes = BufferType.from(await second.read({ format: storage.formats.binary }));
+    const firstImage = PNG.sync.read(firstBytes);
+    const secondImage = PNG.sync.read(secondBytes);
+    if (firstImage.width !== secondImage.width || firstImage.height !== secondImage.height) return false;
+    // Re-export may drop or rewrite ancillary color chunks while leaving the
+    // decoded image untouched. Keep the already published PNG in that case.
+    if (firstImage.data.length !== secondImage.data.length) return false;
+    for (let index = 0; index < firstImage.data.length; index += 4) {
+      if (firstImage.data[index + 3] !== secondImage.data[index + 3]) return false;
+      if (firstImage.data[index + 3] && (firstImage.data[index] !== secondImage.data[index]
+          || firstImage.data[index + 1] !== secondImage.data[index + 1]
+          || firstImage.data[index + 2] !== secondImage.data[index + 2])) return false;
+    }
+    return true;
+  }
+
   async function temporaryFile() {
     const folder = await storage.localFileSystem.getTemporaryFolder();
     temporaryCounter += 1;
@@ -215,7 +244,7 @@ function createImaging(dependencies) {
     } finally { await file.delete(); }
   }
 
-  return { getPixels, createImageDataFromBuffer, putPixels };
+  return { getPixels, createImageDataFromBuffer, putPixels, readPngSize, samePngContent };
 }
 
 module.exports = createImaging();

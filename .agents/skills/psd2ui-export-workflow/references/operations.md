@@ -173,6 +173,6 @@ containers 用 alias/name/members 创建普通组；groups 用于组件组合，
 
 psd2ui_export_bundle 输入 expectedDocumentPath、uiResPath。导出内部检查命名、配置引用和共享图片冲突，并返回 json/folder/sidecarPath 等结果。不能把现有 authoring 镜像编辑成新的交付 JSON。
 
-图片基础名决定资源模块；旧 @ 后缀不决定用途。组/文字允许中文，同名图片要比较实际像素与导出参数。九宫 PNG 已压缩可拉伸区域，仍保留原布局尺寸。初始化时指定的界面 module 与各张图片的 module 不是一回事。
+图片基础名决定资源模块；旧 @ 后缀不决定用途。组/文字允许中文。同名、同类型且导出描述尺寸相符的资源可能复用已有 PNG，像素颜色与节点 opacity 不作为冲突条件；九宫参数、资源身份和所有权仍受保护。面板可指定同一 PSD 的九宫共用源图，但 `set-shared-nine-slice-source` 不在日常 MCP 白名单内，需要用户在面板完成。九宫 PNG 已压缩可拉伸区域，仍保留原布局尺寸。初始化时指定的界面 module 与各张图片的 module 不是一回事。
 
 当前日常 MCP 不开放已有文档 module 修改、任意 Photoshop JSX 执行、手绘新素材、任意滤镜编辑或 Unity 构建。两个旧维护工具默认隐藏，不为日常任务自动启用 --maintenance。

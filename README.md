@@ -15,7 +15,7 @@ PSD2UI 是一套 Photoshop 内的 UI 制作与交付工具。美术在 PSD 中�
 | 美术和程序对组件结构理解不同 | 在 PSD 中保存组件类型、角色、模板和状态，随 JSON 一起交付 |
 | 切图后还要手工记录位置、尺寸、文字等信息 | 从当前 PSD 读取布局和视觉参数，统一导出图片与配置 |
 | 列表的展示样例被当成真实条目 | 明确指定完整条目模板，把其他条目标记为仅预览 |
-| 公共图片重名、重复导出或被意外替换 | 按资源模块管理图片，导出时检查像素和参数，符合条件才复用 |
+| 公共图片重名、重复导出或被意外替换 | 按资源身份、类型、导出尺寸和九宫参数管理复用，并保护已有交付 |
 | 改版后难以判断现有配置是否仍适用 | 读取实时图层与已保存配置，由人工或 AI 对照分析再处理 |
 | 希望 AI 帮忙，但缺少真实的 Photoshop 操作接口 | MCP 提供图层读取、配置、受控结构修改和导出工具，Skill 组织处理流程 |
 
@@ -51,33 +51,33 @@ AI 客户端 → Skill + PS-MCP → Photoshop / PSD
 
 CEP 以 PS 20.0.4 为目标版本；其他 Photoshop 版本的兼容性需要在实际环境中确认。两版安装方式不同，请按对应分支的说明操作。
 
-当前页面是 **CEP 版 0.3.8** 的使用说明。
+当前页面是 **CEP 版 0.4.6** 的使用说明。
 
 ## 安装 CEP 版
 
-### 已有安装包
+### 已有签名安装目录
 
 1. 关闭 Photoshop。
-2. 将 `PSD2UI-CEP-0.3.8-Windows-Install-r2.zip` **完整解压**到普通文件夹。
-3. 双击解压后的 `Install.cmd`，等待安装完成。
+2. 把交付目录中的 `Install.cmd`、`Install.ps1`、`PSD2UI-CEP.version.json`、`package-files.json`、`SIGNATURE.txt` 和 `com.yoyoengine.psd2ui.cep/` **一起复制**到普通文件夹，保留插件目录内的签名文件。
+3. 双击 `Install.cmd`，等待安装完成。
 4. 重新打开 Photoshop，在「窗口 → 扩展功能 → PSD2UI」打开面板。
 
 安装包可以离线使用，不需要管理员权限、Creative Cloud Desktop、开发工具或独立 Node.js。更新版本时也使用相同的安装入口，旧插件会自动备份。更多说明见 [安装与更新](psd2ui/scripts/cep-install/README.md)。
 
 ### 没有安装包，只有仓库源码
 
-仓库包含已经生成的面板，可以直接生成安装包：
+仓库包含已经生成的面板，可以从源码生成签名安装目录：
 
 1. 在当前 `main` 分支点击 **Code → Download ZIP**，解压源码；也可以使用 Git 克隆仓库。
 2. 在包含本 README 的目录打开 Windows PowerShell，运行：
 
    ```powershell
-   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\psd2ui\scripts\package-cep.ps1 -SkipBuild
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\psd2ui\scripts\package-cep.ps1 -SkipBuild -OutputDirectory .\psd2ui\dist
    ```
 
-3. 从 `psd2ui/dist/` 找到生成的 `PSD2UI-CEP-0.3.8-Windows-Install-r2.zip`，按上面的安装步骤操作。
+3. 在 `psd2ui/dist/` 查看 `PSD2UI-CEP.version.json` 中的实际版本，确认同级有 `Install.cmd` 和已签名的 `com.yoyoengine.psd2ui.cep/`，再按上面的安装步骤操作。
 
-首次生成安装包需要联网下载 Adobe 签名工具，无需重新构建面板或安装 Node.js。源码 ZIP 本身不是安装包；源码中的 `Install.cmd` 需要打包生成的签名文件和清单，不能单独运行。
+首次打包需要联网下载并校验 Adobe 签名工具。`-SkipBuild` 使用仓库内的预生成面板，不要求 Node.js；修改源码后则需安装锁定依赖、重新构建并签名。GitHub 的 Source code ZIP 是源码，不是可直接安装的签名目录。当前脚本输出平铺文件，不生成外层 ZIP 或 ZXP。
 
 ## 完成第一次导出
 
@@ -151,13 +151,15 @@ PSD 旁还会生成 `*.psd2ui.authoring.json`，用于保存配置镜像。它�
 
 手动指定的类型、九宫和必要 Image 角色优先保留。这个规则用于选择导出类型，不会自动缩小图片。
 
-九宫图片填写左、上、右、下边框后，导出的 PNG 会压缩可拉伸区域，同时保留节点原始布局尺寸。程序导入时需要同时使用图片和边框配置，不能用缩小后的 PNG 尺寸替代布局尺寸。[详细规则](psd2ui/docs/IMAGE_SIZE_STANDARD.md)
+首次导出九宫图片时填写左、上、右、下边框；PNG 会压缩可拉伸区域，节点仍保留原始布局尺寸。后续 PSD 复用已有同名九宫时，可以把四边保留为 `0/0/0/0`，由现有交付继承边距；如果还没有可用的旧 PNG 和记录，就必须填写真实边距。[详细规则](psd2ui/docs/IMAGE_SIZE_STANDARD.md)
 
 ### 模块、命名与重复资源
 
 “界面所属模块”用于描述当前界面；每张图片自己的模块来自图片基础名。一个 shop 界面仍可以引用 comm 模块的公共图片，它们会进入 sprite/comm 或 texture/comm。
 
-图片名需要符合检查规则，组名和文字内容允许中文。旧 @ 后缀没有功能含义。多份 PSD 共用同名资源时，像素、尺寸及相关导出参数一致才会复用；有冲突时应先核对来源，而不是让 AI 自动改名或覆盖。
+图片名需要符合检查规则，组名和文字内容允许中文。旧 @ 后缀没有功能含义。同名、同类型且导出描述尺寸相符的图片可复用已有 PNG；像素颜色、逐像素透明度和图层 opacity 不再作为同名冲突条件。九宫参数、资源身份和所有权仍需匹配，实际显示采用选定或已存在的 PNG，使用者应确认哪些画面允许共用。面板可以给同一 PSD 的多个九宫层指定共用源图，引用层可保留各自布局尺寸；这项设置尚未开放到日常 MCP。
+
+0.4.6 重复导出同一 PSD 时，若解码后的图片尺寸和像素未变化，会保留现有 PNG 文件；未变化的 JSON 也不会覆盖，已保存且配置未变的 PSD 不会重复保存。这是重复导出的文件更新规则，与上面的跨 PSD 同名资源复用规则分别判断。
 
 ### PSD 配置与交付文件
 

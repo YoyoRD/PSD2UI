@@ -12,6 +12,8 @@
     var serial = 0;
     var stateRead = null;
     var layerLookups = {};
+    var scopedHistorySupported = null;
+    var documentHistoryIds = {};
     var own = Object.prototype.hasOwnProperty;
 
     function has(value, key) { return own.call(value, key); }
@@ -151,15 +153,16 @@
     function stringifyJson(input) {
         var parents = [];
         function quote(value) {
-            // ExtendScript's replace callback becomes quadratic on long XMP/text
-            // strings. Bound each replacement and join once (also used by getXmp).
+            // 大配置中引号和反斜线最常见，使用原生替换避免逐字符进入 ES3 回调。
+            // 仍分块处理，防止旧宿主在长字符串上反复复制。
             var source = String(value), chunks = [], offset;
+            var known = { '\b': '\\b', '\f': '\\f', '\n': '\\n', '\r': '\\r', '\t': '\\t' };
             function escapeCharacter(character) {
-                var known = { '"': '\\"', '\\': '\\\\', '\b': '\\b', '\f': '\\f', '\n': '\\n', '\r': '\\r', '\t': '\\t' };
                 return has(known, character) ? known[character] : '\\u' + ('0000' + character.charCodeAt(0).toString(16)).slice(-4);
             }
             for (offset = 0; offset < source.length; offset += 2048) {
-                chunks.push(source.substr(offset, 2048).replace(/["\\\x00-\x1f\u2028\u2029]/g, escapeCharacter));
+                chunks.push(source.substr(offset, 2048).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+                    .replace(/[\x00-\x1f\u2028\u2029]/g, escapeCharacter));
             }
             return '"' + chunks.join('') + '"';
         }
@@ -377,21 +380,24 @@
         return { contents: String(item.contents), characterStyle: { size: size, leading: leading, color: rgb ? { rgb: rgb } : null },
             paragraphStyle: { justification: justification }, isPointText: kind === 'POINTTEXT', isParagraphText: kind === 'PARAGRAPHTEXT' };
     }
-    function readLayer(document, layer, shallow) {
+    function readLayer(document, layer, shallow, deferGeometry) {
         var descriptor = convertDescriptor(layerDescriptor(document.id, layer.id)), children = [], index;
         function descriptorBounds(raw) {
             if (!raw || !raw.left || !raw.top || !raw.right || !raw.bottom) { return null; }
             return { left: Number(raw.left._value), top: Number(raw.top._value), right: Number(raw.right._value), bottom: Number(raw.bottom._value) };
         }
         var area = null;
-        if (layer.typename !== 'LayerSet') { area = descriptorBounds(descriptor.bounds); }
+        if (layer.typename !== 'LayerSet' || deferGeometry) { area = descriptorBounds(descriptor.bounds); }
+        if (!area && deferGeometry && layer.typename === 'LayerSet') { area = { left: 0, top: 0, right: 0, bottom: 0 }; }
         if (!area) { area = bounds(layer.bounds); }
         var noEffects = descriptorBounds(descriptor.boundsNoEffects);
+        if (!noEffects && deferGeometry && layer.typename === 'LayerSet') { noEffects = area; }
         if (!noEffects) { try { noEffects = bounds(layer.boundsNoEffects); } catch (noDomBounds) { noEffects = area; } }
         if (!shallow && layer.typename === 'LayerSet') { for (index = 0; index < layer.layers.length; index += 1) { children.push(readLayer(document, layer.layers[index])); } }
         var kind = kindName(layer), clipped = descriptor.group === true;
         if (!has(descriptor, 'group')) { try { clipped = layer.grouped === true; } catch (noGrouped) {} }
         return { id: layer.id, name: String(descriptor.name == null ? layer.name : descriptor.name), kind: kind, bounds: area, boundsNoEffects: noEffects,
+            deferredBounds: kind === 'group' && deferGeometry === true,
             visible: has(descriptor, 'visible') ? Boolean(descriptor.visible) : Boolean(layer.visible),
             opacity: typeof descriptor.opacity === 'number' ? descriptor.opacity * 100 / 255 : Number(layer.opacity),
             blendMode: descriptor.mode && descriptor.mode._value ? descriptor.mode._value : blendName(layer.blendMode),
@@ -409,16 +415,37 @@
         }
         return output;
     }
+    function documentHistoryId(document) {
+        var documentKey = String(document.id);
+        function read(scoped) {
+            var reference = new ActionReference();
+            reference.putEnumerated(sid('historyState'), sid('ordinal'), sid('targetEnum'));
+            if (scoped) { reference.putIdentifier(sid('document'), Number(document.id)); }
+            var value = executeActionGet(reference).getInteger(sid('ID'));
+            documentHistoryIds[documentKey] = value;
+            return value;
+        }
+        // Photoshop 21.2 rejects a document container on historyState references.
+        // The common active-document path needs neither that reference nor activation.
+        if (String(activeId()) === documentKey) { return read(false); }
+        if (scopedHistorySupported !== false) {
+            try { var value = read(true); scopedHistorySupported = true; return value; }
+            catch (unsupportedScopedHistory) { scopedHistorySupported = false; }
+        }
+        // Legacy Photoshop exposes exact history only for the front document.
+        // Recheck when the user activates it; polling must never activate documents.
+        if (!has(documentHistoryIds, documentKey)) { documentHistoryIds[documentKey] = 'inactive:' + documentKey; }
+        return documentHistoryIds[documentKey];
+    }
     function probe() {
         var output = { activeDocumentId: activeId(), documents: [], version: String(app.version) }, index;
+        var open = openDocumentIds(), key;
+        for (key in documentHistoryIds) { if (has(documentHistoryIds, key) && !has(open, key)) { delete documentHistoryIds[key]; } }
         for (index = 0; index < app.documents.length; index += 1) {
-            var document = app.documents[index], reference = new ActionReference();
-            reference.putEnumerated(sid('historyState'), sid('ordinal'), sid('targetEnum'));
-            reference.putIdentifier(sid('document'), Number(document.id));
-            var history = executeActionGet(reference);
+            var document = app.documents[index], historyId = documentHistoryId(document);
             output.documents.push({ id: document.id, title: String(document.name), name: String(document.name), path: documentPath(document),
-                width: pixels(document.width), height: pixels(document.height), resolution: Number(document.resolution),
-                activeLayerIds: selectionIds(document), historyId: history.getInteger(sid('ID')) });
+                width: pixels(document.width), height: pixels(document.height), resolution: Number(document.resolution), saved: document.saved === true,
+                activeLayerIds: selectionIds(document), historyId: historyId });
         }
         return output;
     }
@@ -445,10 +472,10 @@
             var count = documentProperty(document.id, 'numberOfLayers').getInteger(sid('numberOfLayers')), minimum = 1;
             try { document.backgroundLayer; minimum = 0; } catch (noBackground) {}
             frames.push({ document: document, parents: [], root: { layers: document.layers, index: 0 },
-                index: count, minimum: minimum, resolution: Number(document.resolution) });
+                index: count, minimum: minimum, resolution: Number(document.resolution), deferGeometry: params.deferGeometry === true });
         }
         stateRead = { token: uid('Read'), stamp: stringifyJson(stamp), frames: frames };
-        return { token: stateRead.token, stamp: stamp, reusedDocumentIds: reused };
+        return { token: stateRead.token, stamp: stamp, reusedDocumentIds: reused, done: frames.length === 0 };
     }
     function indexedTextItem(text, resolution) {
         var ranges = text && text.textStyleRange, paragraphs = text && text.paragraphStyleRange, shapes = text && text.textShape;
@@ -502,16 +529,17 @@
         // Rare adjustment/color-model/older-host cases retain the original DOM
         // projection. Do not invent approximations to make the fast path pass.
         if (!kind || !boundsValue || !noEffects || typeof descriptor.opacity !== 'number' || !descriptor.mode) {
-            return readLayer(frame.document, resolveLayer(), true);
+            return readLayer(frame.document, resolveLayer(), true, frame.deferGeometry);
         }
         // AM reports the canvas rectangle for some LayerSet bounds. Keep DOM
         // rendered group bounds, using the known parent/child position (no ID scan).
-        if (kind === 'group') { boundsValue = bounds(resolveLayer().bounds); }
+        if (kind === 'group' && !frame.deferGeometry) { boundsValue = bounds(resolveLayer().bounds); }
         if (kind === 'text') {
             textItem = indexedTextItem(descriptor.textKey, frame.resolution);
             if (!textItem) { textItem = readTextItem(resolveLayer(), frame.document); }
         }
         return { id: descriptor.layerID, name: String(descriptor.name), kind: kind, bounds: boundsValue, boundsNoEffects: noEffects,
+            deferredBounds: kind === 'group' && frame.deferGeometry === true,
             visible: descriptor.visible !== false, opacity: descriptor.opacity * 100 / 255, blendMode: descriptor.mode._value,
             clipped: descriptor.group === true, hasLayerMask: descriptor.hasUserMask === true, hasVectorMask: descriptor.hasVectorMask === true,
             textItem: textItem, descriptor: descriptor, layers: [] };
@@ -554,7 +582,8 @@
         checkStamp();
         // Return to CEP frequently so Photoshop can process input between pages.
         // Publish no partial tree: the panel assembles and commits the final page.
-        while (scan.frames.length && items.length < 8 && new Date().getTime() - started < 80) {
+        // Even a slow probe must allow one layer per page to guarantee progress.
+        while (scan.frames.length && items.length < 8 && (items.length === 0 || new Date().getTime() - started < 80)) {
             var frame = scan.frames[scan.frames.length - 1];
             if (frame.index < frame.minimum) {
                 if (frame.parents.length) { fail('Layer group markers are unbalanced.', 'PSD2UI_STATE_TREE_INVALID'); }
@@ -584,17 +613,18 @@
     }
     function select(document, ids, add) {
         if (!ids || !ids.length) { fail('At least one layerId is required.', 'PSD2UI_EMPTY_SELECTION'); }
-        var combined = add ? selectionIds(document) : [], index, candidate, found, second;
+        var combined = add ? selectionIds(document) : [], additions = [], index, candidate, found, second;
+        var extend = combined.length > 0;
         for (index = 0; index < ids.length; index += 1) {
             candidate = requireLayer(document, ids[index]).id; found = false;
             for (second = 0; second < combined.length; second += 1) { if (String(combined[second]) === String(candidate)) { found = true; break; } }
-            if (!found) { combined.push(candidate); }
+            if (!found) { combined.push(candidate); additions.push(candidate); }
         }
         activate(document);
-        for (index = 0; index < combined.length; index += 1) {
+        for (index = 0; index < additions.length; index += 1) {
             var descriptor = new ActionDescriptor(), reference = new ActionReference();
-            reference.putIdentifier(sid('layer'), Number(combined[index])); descriptor.putReference(cid('null'), reference);
-            if (index > 0) { descriptor.putEnumerated(sid('selectionModifier'), sid('selectionModifierType'), sid('addToSelection')); }
+            reference.putIdentifier(sid('layer'), Number(additions[index])); descriptor.putReference(cid('null'), reference);
+            if (extend || index > 0) { descriptor.putEnumerated(sid('selectionModifier'), sid('selectionModifierType'), sid('addToSelection')); }
             descriptor.putBoolean(sid('makeVisible'), false); executeAction(sid('select'), descriptor, DialogModes.NO);
         }
     }
@@ -665,6 +695,47 @@
     var methods = {};
     methods.state = function () { return state(); };
     methods.probe = function () { return probe(); };
+    // 精确组边界独立读取，普通编辑通知不会触发 DOM 渲染边界计算。
+    methods.readGeometry = function (params) {
+        var stamp = stringifyJson(params.stamp), document = requireDocument(docId(params)), items = [], index;
+        if (stringifyJson(probe()) !== stamp) { fail('Document changed before geometry read.', 'PSD2UI_STATE_CHANGED'); }
+        for (index = 0; index < params.layerIds.length; index += 1) {
+            var layer = requireLayer(document, params.layerIds[index]);
+            items.push({ id: layer.id, bounds: bounds(layer.bounds), boundsNoEffects: bounds(layer.boundsNoEffects) });
+        }
+        if (stringifyJson(probe()) !== stamp) { fail('Document changed during geometry read.', 'PSD2UI_STATE_CHANGED'); }
+        return { layers: items };
+    };
+    methods.readVisibility = function (params) {
+        var stamp = stringifyJson(params.stamp), document = requireDocument(docId(params));
+        if (stringifyJson(probe()) !== stamp) { fail('Document changed before visibility read.', 'PSD2UI_STATE_CHANGED'); }
+        var ids = params.layerIds || [], groups = params.groupIds || [], items = [], index, groupIndex;
+        for (index = 0; index < ids.length; index += 1) {
+            var reference = new ActionReference();
+            reference.putProperty(sid('property'), sid('visible'));
+            reference.putIdentifier(sid('layer'), Number(ids[index]));
+            reference.putIdentifier(sid('document'), Number(document.id));
+            var item = { id: ids[index], visible: executeActionGet(reference).getBoolean(sid('visible')) };
+            if (params.names === true) {
+                var nameReference = new ActionReference();
+                nameReference.putProperty(sid('property'), sid('name'));
+                nameReference.putIdentifier(sid('layer'), Number(ids[index]));
+                nameReference.putIdentifier(sid('document'), Number(document.id));
+                item.name = executeActionGet(nameReference).getString(sid('name'));
+            }
+            for (groupIndex = 0; groupIndex < groups.length; groupIndex += 1) {
+                if (String(groups[groupIndex]) === String(ids[index])) {
+                    var layer = requireLayer(document, ids[index]);
+                    item.bounds = bounds(layer.bounds);
+                    item.boundsNoEffects = bounds(layer.boundsNoEffects);
+                    break;
+                }
+            }
+            items.push(item);
+        }
+        if (stringifyJson(probe()) !== stamp) { fail('Document changed during visibility read.', 'PSD2UI_STATE_CHANGED'); }
+        return { layers: items };
+    };
     methods.notificationEvents = function () {
         var names = ['select', 'open', 'close', 'make', 'delete', 'set', 'move', 'transform',
             'show', 'hide', 'undo', 'redo', 'historyStateChanged'], ids = [], index;
@@ -752,6 +823,59 @@
     methods.trim = function (params) { var document = requireDocument(docId(params)); requireTemporary(document); activate(document); document.trim(TrimType.TRANSPARENT, true, true, true, true); return null; };
     methods.save = function (params) { var document = requireDocument(docId(params)); if (!documentPath(document)) { fail('Save requires a local document path.', 'PSD2UI_LOCAL_PATH_REQUIRED'); } activate(document); document.save(); return null; };
     methods.savePng = function (params) { savePng(requireDocument(docId(params)), params.path, params.compression != null ? params.compression : (params.options || {}).compression); return null; };
+    methods.exportLayerPng = function (params) {
+        var source = requireDocument(docId(params)), layer = requireLayer(source, layerId(params)), path = nativePath(params.path);
+        var knownIds = openDocumentIds(), workbenchId = null, result, operationError = null, cleanupError = null;
+        if (!/\.png$/i.test(path)) { fail('Layer export requires a PNG path.', 'PSD2UI_INVALID_ARGUMENT'); }
+        var compression = params.compression == null ? 6 : finite(params.compression, 'compression');
+        var area = params.sourceBounds;
+        if (!area || typeof area.left !== 'number' || typeof area.top !== 'number') {
+            fail('Layer export requires numeric sourceBounds.left and sourceBounds.top.', 'PSD2UI_INVALID_ARGUMENT');
+        }
+        // 保持共享导出使用的已同步 AM/组边界，不再次读取语义不同且昂贵的 DOM bounds。
+        area = { left: finite(area.left, 'sourceBounds.left'), top: finite(area.top, 'sourceBounds.top') };
+        try {
+            activate(source);
+            if (params.expectedHistoryId == null || String(documentHistoryId(source)) !== String(params.expectedHistoryId)) {
+                fail('Source history changed before layer export.', 'PSD2UI_STATE_CHANGED');
+            }
+            var width = pixels(source.width), height = pixels(source.height);
+            if (width <= 0 || height <= 0) { fail('Source dimensions must be positive.', 'PSD2UI_INVALID_ARGUMENT'); }
+            // 单张资源的临时状态不进入面板缓存，避免每一步重读源 PSD 全树。
+            var created = app.documents.add(px(width), px(height), 72, 'PSD2UI_Resource_Workbench', NewDocumentMode.RGB, DocumentFill.TRANSPARENT, 1, BitsPerChannelType.EIGHT);
+            var workbench = app.activeDocument;
+            if (!workbench || has(knownIds, String(workbench.id))) { fail('Layer export did not create an independent document.', 'PSD2UI_TEMP_DOCUMENT_CREATE_FAILED'); }
+            workbenchId = workbench.id; temporaryDocuments[String(workbenchId)] = 'layer-export';
+            if (String(created.id) !== String(workbenchId) || documentPath(workbench) || String(workbench.name) !== 'PSD2UI_Resource_Workbench') {
+                fail('Layer export temporary document identity does not match.', 'PSD2UI_TEMP_DOCUMENT_CREATE_FAILED');
+            }
+            activate(source);
+            var copied = layer.duplicate(workbench, ElementPlacement.PLACEATBEGINNING), owner = copied;
+            while (owner && owner.typename !== 'Document') { owner = owner.parent; }
+            if (!owner || String(owner.id) !== String(workbenchId)) { fail('Copied layer is not in the export document.', 'PSD2UI_TEMP_LAYER_MISMATCH'); }
+            activate(workbench);
+            copied.visible = true;
+            if (Number(copied.opacity) !== 100) { copied.opacity = 100; }
+            copied.translate(px(-area.left), px(-area.top));
+            workbench.trim(TrimType.TRANSPARENT, true, true, true, true);
+            savePng(workbench, path, compression);
+            if (!(new File(path)).exists) { fail('Layer export PNG was not written.', 'PSD2UI_PNG_EXPORT_FAILED'); }
+            result = { documentId: source.id, layerId: layer.id, path: path, width: pixels(workbench.width), height: pixels(workbench.height), temporaryDocumentId: workbenchId };
+        } catch (error) { operationError = error; }
+        finally {
+            try {
+                if (workbenchId != null && findDocument(workbenchId)) { closeTemporary(requireDocument(workbenchId)); }
+            } catch (closeError) { cleanupError = closeError; }
+            try { activate(requireDocument(source.id)); }
+            catch (restoreError) { if (!cleanupError) { cleanupError = restoreError; } }
+        }
+        if (operationError) {
+            if (cleanupError) { operationError.message += '\nTemporary export cleanup failed: ' + cleanupError.message; }
+            throw operationError;
+        }
+        if (cleanupError) { throw cleanupError; }
+        result.closed = true; result.activeDocumentId = activeId(); result.stamp = probe(); return result;
+    };
     methods.close = function (params) { closeTemporary(requireDocument(docId(params))); return null; };
     methods.getXmp = function (params) { return getXmp(requireDocument(docId(params))); };
     methods.setXmp = function (params) {
@@ -773,13 +897,25 @@
         if ((params.namespaceUri && params.namespaceUri !== namespaceUri) || (params.namespacePrefix && params.namespacePrefix !== namespacePrefix) || (params.propertyName && params.propertyName !== propertyName)) {
             fail('Manifest namespace does not match PSD2UI.', 'PSD2UI_XMP_NAMESPACE_MISMATCH');
         }
-        var document = requireDocument(docId(params)), serialized = params.serializedManifest != null ? String(params.serializedManifest) : stringifyJson(params.manifest);
-        var parsed = parseJson(serialized); if (!parsed || typeof parsed !== 'object') { fail('Manifest must be a JSON object.', 'PSD2UI_INVALID_MANIFEST'); }
+        var document = requireDocument(docId(params)), serialized;
+        if (params.serializedManifestFile != null) {
+            if (params.validated !== true || params.serializedManifest != null || params.manifest != null
+                || typeof params.serializedManifestLength !== 'number' || !isFinite(params.serializedManifestLength)
+                || params.serializedManifestLength < 2 || Math.floor(params.serializedManifestLength) !== params.serializedManifestLength) {
+                fail('Invalid staged Manifest metadata.', 'PSD2UI_INVALID_MANIFEST_FILE');
+            }
+            serialized = readRequestFile(params.serializedManifestFile, true);
+            if (serialized.length !== params.serializedManifestLength) { fail('Staged Manifest length does not match.', 'PSD2UI_INVALID_MANIFEST_FILE'); }
+        } else { serialized = params.serializedManifest != null ? String(params.serializedManifest) : stringifyJson(params.manifest); }
+        // CEP 的 JSON.stringify 已校验对象；旧调用仍在宿主校验。
+        if (params.validated !== true) {
+            var parsed = parseJson(serialized); if (!parsed || typeof parsed !== 'object') { fail('Manifest must be a JSON object.', 'PSD2UI_INVALID_MANIFEST'); }
+        }
         xmpLibrary(); var raw = getXmp(document), xmp = raw ? new XMPMeta(raw) : new XMPMeta();
         xmp.setProperty(namespaceUri, propertyName, serialized); activate(document); document.xmpMetadata.rawData = xmp.serialize();
         var verified = new XMPMeta(getXmp(document)).getProperty(namespaceUri, propertyName);
         if (!verified || String(verified.value) !== serialized) { fail('Manifest XMP readback does not match.', 'PSD2UI_XMP_READBACK_FAILED'); }
-        return null;
+        return { verified: true, documentId: document.id, serializedLength: serialized.length };
     };
     methods.beginHistory = function (params) {
         var document = requireDocument(docId(params)), id = uid('History'), name = id + '_' + String(params.name || 'Command'), descriptor = new ActionDescriptor(), reference = new ActionReference(), from = new ActionReference();
@@ -903,21 +1039,24 @@
     };
     methods['delete'] = function (params) { var document = requireDocument(docId(params)), layer = requireLayer(document, layerId(params)); activate(document); layer.remove(); return null; };
 
+    function readRequestFile(path, manifest) {
+        var file = File(String(path)), root = normalizedPath(Folder.temp.fsName + '/PSD2UI-CEP-rpc');
+        var validName = manifest ? /^[a-f0-9]{32}\.manifest\.json$/.test(file.name) : /^[a-f0-9]{32}\.json$/.test(file.name);
+        if (normalizedPath(file.parent.fsName) !== root || !validName) {
+            fail('Invalid CEP request file.', 'PSD2UI_INVALID_REQUEST_FILE');
+        }
+        if (!file.exists || file.length > 64 * 1024 * 1024) { fail('CEP request file missing or too large.', 'PSD2UI_INVALID_REQUEST_FILE'); }
+        file.encoding = 'UTF-8';
+        if (!file.open('r')) { fail('Cannot open CEP request file.', 'PSD2UI_INVALID_REQUEST_FILE'); }
+        try { return file.read(); } finally { file.close(); }
+    }
+
     $.PSD2UIHost = {
         // Reused by the isolated ExtendScript smoke runner (the host has no JSON global).
         json: { parse: parseJson, stringify: stringifyJson },
         dispatchFile: function (path) {
-            var file = File(String(path)), root = normalizedPath(Folder.temp.fsName + '/PSD2UI-CEP-rpc');
             try {
-                if (normalizedPath(file.parent.fsName) !== root || !/^[a-f0-9]{32}\.json$/.test(file.name)) {
-                    fail('Invalid CEP request file.', 'PSD2UI_INVALID_REQUEST_FILE');
-                }
-                if (!file.exists || file.length > 64 * 1024 * 1024) { fail('CEP request file missing or too large.', 'PSD2UI_INVALID_REQUEST_FILE'); }
-                file.encoding = 'UTF-8';
-                if (!file.open('r')) { fail('Cannot open CEP request file.', 'PSD2UI_INVALID_REQUEST_FILE'); }
-                var raw;
-                try { raw = file.read(); } finally { file.close(); }
-                return $.PSD2UIHost.dispatch(raw);
+                return $.PSD2UIHost.dispatch(readRequestFile(path, false));
             } catch (error) {
                 return stringifyJson({ ok: false, error: { message: String(error.message || error), code: String(error.code || 'PSD2UI_HOST_ERROR') }, state: null });
             }
@@ -933,7 +1072,8 @@
                 // never trigger a second, unbounded scan as a side effect.
                 if (request.method !== 'state' && request.deferState !== true
                     && request.method !== 'probe' && request.method !== 'notificationEvents' && request.method !== 'beginState' && request.method !== 'statePage'
-                    && request.method !== 'getXmp' && request.method !== 'readManifest') { snapshot = state(); }
+                    && request.method !== 'getXmp' && request.method !== 'readManifest' && request.method !== 'readVisibility' && request.method !== 'readGeometry'
+                    && request.method !== 'exportLayerPng') { snapshot = state(); }
                 response = { ok: true, value: value, state: snapshot };
             } catch (error) {
                 response = { ok: false, error: { message: String(error.message || error), code: String(error.code || error.number || 'PSD2UI_HOST_ERROR'), line: error.line == null ? null : Number(error.line) }, state: snapshot };

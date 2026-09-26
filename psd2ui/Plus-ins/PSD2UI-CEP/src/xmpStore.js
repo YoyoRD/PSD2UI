@@ -4,6 +4,34 @@ const fs = require('./native').requireNative('fs');
 const NamespaceUri = 'https://yoyoengine.dev/psd2ui/1.0/';
 const NamespacePrefix = 'yoyoPsd2ui';
 const PropertyName = 'Manifest';
+const manifests = new WeakMap();
+
+function metadataRevision(document) {
+  const core = photoshop().core;
+  return core && typeof core.getMetadataRevision === 'function' ? core.getMetadataRevision(document) : null;
+}
+function contentToken(document) {
+  const core = photoshop().core;
+  return core && typeof core.getContentToken === 'function' ? core.getContentToken(document) : null;
+}
+function remember(document, manifest, serialized) {
+  const revision = metadataRevision(document);
+  if (revision != null) manifests.set(document, { path: document.path, revision,
+    serialized: serialized === undefined ? JSON.stringify(manifest) : serialized });
+}
+function assertManifestUnchanged(manifest, serialized) {
+  if (JSON.stringify(manifest) !== serialized) throw new Error('保存期间组件配置已变化，已停止发布保存结果，请重新保存。');
+}
+function receipt(document, manifest, sidecarPath, serialized) {
+  assertManifestUnchanged(manifest, serialized);
+  remember(document, manifest, serialized);
+  const result = { sidecarPath };
+  // 只在进程内传递已校验结果，避免再次跨宿主读取整份配置。
+  Object.defineProperty(result, 'verifiedManifest', { get() {
+    return JSON.stringify(manifest) === serialized ? manifest : null;
+  } });
+  return result;
+}
 
 function photoshop() { return require('./photoshop'); }
 function fileCall(method, args) {
@@ -45,13 +73,20 @@ async function getDocumentXmp(document) {
 
 async function setDocumentXmp(rawXmp, document) {
   const source = document || requireLocalDocument();
+  manifests.delete(source);
   await photoshop().invoke('setXmp', { documentID: source.id, rawXmp: String(rawXmp || '') });
 }
 
-async function readManifest(document) {
+async function readManifest(document, options) {
   const source = document || requireLocalDocument();
+  const revision = metadataRevision(source), cached = manifests.get(source);
+  if (!(options && options.fresh) && revision != null && cached && cached.path === source.path && cached.revision === revision) {
+    return JSON.parse(cached.serialized);
+  }
   const result = await photoshop().invoke('readManifest', { documentID: source.id, serialized: true });
-  return typeof result === 'string' ? JSON.parse(result) : result || null;
+  const manifest = typeof result === 'string' ? JSON.parse(result) : result || null;
+  if (revision === metadataRevision(source)) remember(source, manifest);
+  return manifest;
 }
 
 async function writeSidecar(manifest, document) {
@@ -97,31 +132,43 @@ async function restoreSidecarRaw(backup) {
 
 async function writeManifestInCurrentModal(manifest, saveDocument) {
   const document = requireLocalDocument();
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('组件配置必须是 JSON 对象。');
   const serializedManifest = JSON.stringify(manifest);
   assertActiveDocument(document);
-  await photoshop().invoke('writeManifest', {
+  manifests.delete(document);
+  const acknowledged = await photoshop().invoke('writeManifest', {
     documentID: document.id, serializedManifest, namespaceUri: NamespaceUri,
-    namespacePrefix: NamespacePrefix, propertyName: PropertyName
+    namespacePrefix: NamespacePrefix, propertyName: PropertyName, validated: true
   });
   assertActiveDocument(document);
-  const verified = await readManifest(document);
-  if (JSON.stringify(verified) !== serializedManifest) {
-    throw new Error('PSD Manifest 写入后读回不一致，已停止保存文档。');
+  if (!acknowledged || acknowledged.verified !== true || String(acknowledged.documentId) !== String(document.id)
+      || acknowledged.serializedLength !== serializedManifest.length) {
+    const verified = await readManifest(document, { fresh: true });
+    if (JSON.stringify(verified) !== serializedManifest) {
+      throw new Error('PSD Manifest 写入后读回不一致，已停止保存文档。');
+    }
   }
   assertActiveDocument(document);
-  const sidecarPath = await writeSidecar(manifest, document);
+  assertManifestUnchanged(manifest, serializedManifest);
+  const sidecarPath = await writeSidecar(JSON.parse(serializedManifest), document);
   assertActiveDocument(document);
   if (saveDocument !== false) await document.save();
-  return { sidecarPath };
+  return receipt(document, manifest, sidecarPath, serializedManifest);
 }
 
 async function writeManifest(manifest, saveDocument) {
   const document = requireLocalDocument();
+  const expectedToken = contentToken(document);
+  const serializedManifest = JSON.stringify(manifest);
   const originalXmp = await getDocumentXmp(document);
   assertActiveDocument(document);
   const originalSidecar = await readSidecarRaw(document);
   return photoshop().core.executeAsModal(async function () {
     assertActiveDocument(document);
+    if (expectedToken != null && contentToken(document) !== expectedToken) {
+      throw new Error('等待保存期间 PSD 图层已变化，已停止写入，请重新保存组件配置。');
+    }
+    assertManifestUnchanged(manifest, serializedManifest);
     let saveAttempted = false;
     try {
       const result = await writeManifestInCurrentModal(manifest, false);
@@ -130,8 +177,9 @@ async function writeManifest(manifest, saveDocument) {
         saveAttempted = true;
         await document.save();
       }
-      return result;
+      return receipt(document, manifest, result.sidecarPath, serializedManifest);
     } catch (error) {
+      manifests.delete(document);
       const rollbackErrors = [];
       // The original document ID is pinned even if another document became active.
       try { await setDocumentXmp(originalXmp, document); }
@@ -154,7 +202,7 @@ async function writeManifest(manifest, saveDocument) {
       }
       throw error;
     }
-  }, { commandName: 'PSD2UI：保存文档配置与同目录镜像' });
+  }, { commandName: 'PSD2UI：保存文档配置与同目录镜像', metadataOnly: true });
 }
 
 module.exports = {

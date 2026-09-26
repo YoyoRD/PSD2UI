@@ -336,8 +336,8 @@ test('面板启动主动读取 XMP、同目录镜像与图层变化状态', () =
   assert.ok(structureFlow, '找不到面板结构化流程');
   assert.match(
     structureFlow[1],
-    /command: 'sync-layer-tree'[\s\S]*planStructuredGroup[\s\S]*command: 'apply-structured-group'/,
-    '新图层必须先同步进 Manifest，再以现有组根规划并写入组件结构');
+    /planStructuredGroup[\s\S]*command: 'apply-structured-group'[\s\S]*persistManifest\(configured, null, null, snapshot\)/,
+    '组件预设应用后必须用同一完整快照同步并保存，避免预设覆盖真实显隐和文字');
   assert.doesNotMatch(
     structureFlow[1],
     /structureActiveLayers|createLayerGroup|resolveStructureGroupName|node-name/,

@@ -10,6 +10,7 @@ const selection = require('./selection');
 const snapshot = require('./snapshot');
 const nineSlice = require('./nineSlice');
 const naming = require('./naming');
+const documentIdentity = require('./documentIdentity');
 
 module.exports = {
   ...commands,
@@ -21,5 +22,6 @@ module.exports = {
   ...selection,
   ...snapshot,
   ...nineSlice,
-  ...naming
+  ...naming,
+  ...documentIdentity
 };

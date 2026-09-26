@@ -205,8 +205,27 @@ function validateNode(node, path, registry, issues, sourceNaming) {
     if (typeof node.text.value !== 'string') {
       issues.push(issue('PSD2UI_TEXT_VALUE_REQUIRED', '文本内容必须显式填写。', `${path}.text.value`));
     }
+    if (Object.prototype.hasOwnProperty.call(node.text, 'renderValue')) {
+      const renderValue = node.text.renderValue;
+      const valid = typeof renderValue === 'string' && !renderValue.includes('\r')
+        && /^(?:<color=#[0-9A-Fa-f]{8}>[^<]+<\/color>)+$/.test(renderValue)
+        && renderValue.replace(/<color=#[0-9A-Fa-f]{8}>|<\/color>/g, '')
+          === String(node.text.value || '').replace(/\r\n?/g, '\n')
+        && node.text.richText === 'enabled';
+      if (!valid) issues.push(issue('PSD2UI_TEXT_RENDER_VALUE_INVALID',
+        'renderValue 必须以完整 color 标签覆盖原文，移除标签后等于换行归一的 value，且 richText 为 enabled。',
+        `${path}.text.renderValue`));
+    }
     if (typeof node.text.fontKey !== 'string' || !node.text.fontKey.trim()) {
       issues.push(issue('PSD2UI_FONT_KEY_REQUIRED', '文本必须提供 fontKey；未配置时使用 default。', `${path}.text.fontKey`));
+    }
+    if (Object.prototype.hasOwnProperty.call(node.text, 'fontPostScriptName')
+        && (typeof node.text.fontPostScriptName !== 'string'
+          || !node.text.fontPostScriptName.trim()
+          || /[\x00-\x1F]/.test(node.text.fontPostScriptName))) {
+      issues.push(issue('PSD2UI_FONT_POSTSCRIPT_NAME_INVALID',
+        'fontPostScriptName 必须是非空、无控制字符的 Photoshop PostScript 字体名。',
+        `${path}.text.fontPostScriptName`));
     }
     validateTextEffects(node.text.effects, `${path}.text.effects`, issues);
     if (node.text.lineAdvance != null && (!Number.isFinite(node.text.lineAdvance) || node.text.lineAdvance <= 0)) {
@@ -307,6 +326,11 @@ function validateManifest(manifest) {
   Object.keys(registry.resources).forEach((resourceId) => {
     const resource = registry.resources[resourceId];
     if (!resource || resource.status !== 'active') return;
+    if (resource.exportSourceLayerId != null && (!sourceNaming || resource.kind !== 'sprite'
+        || typeof resource.exportSourceLayerId !== 'string' || !resource.exportSourceLayerId.trim())) {
+      issues.push(issue('PSD2UI_SHARED_SLICE_SOURCE_INVALID', '共用九宫源图必须是原名 Sprite 资源的有效图层 ID。',
+        `resourceRegistry.resources.${resourceId}.exportSourceLayerId`));
+    }
     let expected;
     try {
       if (sourceNaming) {

@@ -5,6 +5,7 @@ const { fail } = require('./errors');
 const { ensureRegistry } = require('./resourceRegistry');
 const { prepareManifestForExport, collectUnconfiguredEmptyGroupIds } = require('./snapshot');
 const { normalizeSliceBorder } = require('./nineSlice');
+const { sharedNineSliceSource } = require('./sharedNineSlice');
 const { collectInvalidImageLayerNames, collectInvalidLayerNames, stripLegacyLayerSuffix } = require('./naming');
 
 function prepareSourceManifest(manifest, snapshot, options) {
@@ -119,6 +120,13 @@ function buildBundle(manifest, snapshot) {
     (layer.children || []).forEach(collectRuntimeNodes);
   }
   collectRuntimeNodes(snapshotRoot);
+  const sharedSources = new Map();
+  runtimeNodes.forEach(node => {
+    const resourceId = node.image && node.image.resourceId;
+    if (!resourceId || sharedSources.has(resourceId)) return;
+    const source = sharedNineSliceSource(exportManifest, registry.resources[resourceId], byId, runtimeNodes);
+    if (source) sharedSources.set(resourceId, source);
+  });
   runtimeNodes.forEach((authored) => {
     if (sourceNaming && authored.visualStates) {
       const visualStates = authored.visualStates;
@@ -188,7 +196,8 @@ function buildBundle(manifest, snapshot) {
     let normalizedSlice = null;
     if (sliceBorder) {
       try {
-        normalizedSlice = normalizeSliceBorder(sliceBorder, Math.max(1, Math.round(width)), Math.max(1, Math.round(height)));
+        normalizedSlice = sharedSources.has(resourceId) ? sharedSources.get(resourceId).border
+          : normalizeSliceBorder(sliceBorder, Math.max(1, Math.round(width)), Math.max(1, Math.round(height)));
       } catch (error) {
         error.details = { ...(error.details || {}), layerId, resourceId };
         throw error;
@@ -239,7 +248,15 @@ function buildBundle(manifest, snapshot) {
       button: cloneComponent(authored.button),
       children: []
     };
-    if (!sourceNaming && node.text) delete node.text.layoutMode;
+    if (!sourceNaming && node.text) {
+      delete node.text.layoutMode;
+      delete node.text.renderValue;
+      delete node.text.fontPostScriptName;
+    }
+    if (sourceNaming && node.text && layer.text && layer.text.fontWarning) {
+      node.text.fontKey = 'default';
+      delete node.text.fontPostScriptName;
+    }
     if (sourceNaming && authored.viewport) {
       node.rect.width = authored.viewport.width;
       node.rect.height = authored.viewport.height;
@@ -253,6 +270,12 @@ function buildBundle(manifest, snapshot) {
       };
     }
     if (node.image && node.image.resourceId) {
+      const shared = sharedSources.get(node.image.resourceId);
+      if (shared) {
+        if (node.image.imageType !== 'sliced') fail('PSD2UI_SHARED_SLICE_REFERENCE_INVALID',
+          `共用九宫 '${node.name}' 的引用层 ${layerId} 必须使用九宫格类型。`, { layerId });
+        node.image.sliceBorder = cloneComponent(shared.border);
+      }
       useResource(node.image.resourceId, node.image.sliceBorder, node.rect.width, node.rect.height, layerId);
     }
     if (node.rawImage && node.rawImage.resourceId) useResource(node.rawImage.resourceId, null, 0, 0, layerId);
@@ -279,7 +302,8 @@ function buildBundle(manifest, snapshot) {
       fail('PSD2UI_BUNDLE_RESOURCE_MISSING', `Bundle 引用了无效资源 '${resourceId}'。`, { resourceId, layerIds: [...resourceSourceLayers.get(resourceId) || []] });
     }
     const sourceLayerIds = Array.from(resourceSourceLayers.get(resourceId) || []);
-    const sourceLayerId = sourceLayerIds.includes(String(resource.sourceLayerId))
+    const shared = sharedSources.get(resourceId);
+    const sourceLayerId = shared ? shared.layerId : sourceLayerIds.includes(String(resource.sourceLayerId))
       ? String(resource.sourceLayerId) : sourceLayerIds[0];
     return {
       id: resource.id,
@@ -291,6 +315,7 @@ function buildBundle(manifest, snapshot) {
       fileName: resource.fileName,
       sourceLayerId: sourceNaming ? sourceLayerId : resource.sourceLayerId,
       ...(sourceNaming ? { sourceLayerIds } : {}),
+      ...(shared ? { exportSourceLayerId: shared.layerId } : {}),
       sliceBorder: usedResources.get(resourceId)
     };
   }).sort((left, right) => left.fileName.localeCompare(right.fileName));

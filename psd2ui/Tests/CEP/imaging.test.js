@@ -136,3 +136,62 @@ test('fully transparent requested regions remain empty rather than opaque white 
   assert.equal(result.imageData.height, 0);
   assert.equal((await result.imageData.getData()).length, 0);
 });
+
+test('PNG size checks decode locally without opening Photoshop documents', async t => {
+  const h = harness(t, rgba(26, 28, () => [1, 2, 3, 0]));
+  const folder = await h.storage.localFileSystem.getTemporaryFolder();
+  const file = await folder.createFile('shared.png');
+  const bytes = PNG.sync.write(rgba(26, 28, () => [1, 2, 3, 0]));
+  await file.write(bytes, { format: h.storage.formats.binary });
+  assert.deepEqual(await h.imaging.readPngSize(file), { width: 26, height: 28 });
+  assert.deepEqual(h.calls, []);
+  assert.deepEqual(Buffer.from(await file.read({ format: h.storage.formats.binary })), bytes);
+});
+
+test('PNG content comparison retains existing color profiles when decoded pixels match', async t => {
+  const image = rgba(26, 28, (x, y) => [x * 7, y * 5, x + y, 255]);
+  const h = harness(t, image);
+  const folder = await h.storage.localFileSystem.getTemporaryFolder();
+  const first = await folder.createFile('first.png');
+  const second = await folder.createFile('second.png');
+  const firstBytes = PNG.sync.write(image, { colorType: 6, inputColorType: 6 });
+  const metadata = Buffer.from('Comment\0another PNG encoding');
+  const chunk = Buffer.alloc(metadata.length + 12);
+  chunk.writeUInt32BE(metadata.length, 0);
+  chunk.write('tEXt', 4);
+  metadata.copy(chunk, 8);
+  chunk.writeUInt32BE(require('pngjs/lib/crc').crc32(chunk.subarray(4, metadata.length + 8)) >>> 0,
+    metadata.length + 8);
+  const secondBytes = Buffer.concat([firstBytes.subarray(0, 33), chunk, firstBytes.subarray(33)]);
+  assert.notDeepEqual(firstBytes, secondBytes);
+  await first.write(firstBytes, { format: h.storage.formats.binary });
+  await second.write(secondBytes, { format: h.storage.formats.binary });
+  assert.equal(await h.imaging.samePngContent(first, second), true);
+  const profile = Buffer.concat([Buffer.from('Artist ICC\0\0'),
+    require('node:zlib').deflateSync(Buffer.from('opaque ICC fixture'))]);
+  const icc = Buffer.alloc(profile.length + 12);
+  icc.writeUInt32BE(profile.length, 0);
+  icc.write('iCCP', 4);
+  profile.copy(icc, 8);
+  icc.writeUInt32BE(require('pngjs/lib/crc').crc32(icc.subarray(4, profile.length + 8)) >>> 0,
+    profile.length + 8);
+  await first.write(Buffer.concat([firstBytes.subarray(0, 33), icc, firstBytes.subarray(33)]),
+    { format: h.storage.formats.binary });
+  assert.equal(await h.imaging.samePngContent(first, second), true);
+  const changed = rgba(26, 28, (x, y) => [x * 7, y * 5, x + y + (x === 1 && y === 1 ? 1 : 0), 255]);
+  await second.write(PNG.sync.write(changed), { format: h.storage.formats.binary });
+  assert.equal(await h.imaging.samePngContent(first, second), false);
+  assert.deepEqual(h.calls, []);
+});
+
+test('local PNG size checks reject corrupt, truncated and unreadable input', async t => {
+  const h = harness(t, rgba(2, 3, () => [1, 2, 3, 255]));
+  const png = PNG.sync.write(rgba(2, 3, () => [1, 2, 3, 255]));
+  const corrupt = Buffer.from(png);
+  corrupt[32] ^= 1;
+  for (const bytes of [Buffer.from('not PNG'), png.subarray(0, 33), corrupt]) {
+    await assert.rejects(h.imaging.readPngSize({ async read() { return bytes; } }));
+  }
+  await assert.rejects(h.imaging.readPngSize({ async read() { throw new Error('file unavailable'); } }), /file unavailable/);
+  assert.deepEqual(h.calls, []);
+});

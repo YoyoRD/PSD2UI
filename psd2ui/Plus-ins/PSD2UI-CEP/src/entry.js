@@ -15,14 +15,15 @@ async function start() {
   await new Promise(resolve => setTimeout(resolve, 100));
   await photoshop.initialize();
   delete globalThis.__PSD2UI_HOST_PROGRESS__;
-  globalThis.__PSD2UI_REFRESH_HOST__ = () => photoshop.refresh();
+  globalThis.__PSD2UI_REFRESH_HOST__ = () => photoshop.refresh({ verifyVisibility: true });
   require('../../PSD2UI/app');
   const commandServer = await startCommandServer({
     automation: globalThis.__PSD2UI_DEV__,
     isUncertain: () => require('./hostRpc').isUncertain(),
-    beforeInvoke: () => photoshop.refresh(),
+    beforeInvoke: () => photoshop.refresh({ verifyVisibility: true }),
     run: (label, action) => globalThis.__PSD2UI_RUN__(label, action),
-    status: () => ({ photoshopVersion: photoshop.app.version || '', documentCount: photoshop.app.documents.length })
+    status: () => ({ photoshopVersion: photoshop.app.version || '', documentCount: photoshop.app.documents.length,
+      performance: require('./performance').snapshot() })
   });
   const notifications = await startNotifications({
     bridge: window.__adobe_cep__, photoshop, document, window,

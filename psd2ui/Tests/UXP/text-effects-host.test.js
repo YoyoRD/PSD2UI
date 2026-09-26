@@ -109,6 +109,170 @@ test('新 PS 参数保留全部效果与共同字段，CR 和自动行距在源�
   assert.equal(exported.photoshop.descriptorJson, text.photoshop.descriptorJson);assert.equal(exported.lineAdvance, 60);
 });
 
+test('同层中文混色按原始 UTF-16 范围生成完整 color 标签，纯文本和换行仍保留', () => {
+  const green = { _obj: 'RGBColor', red: 0, grain: 153, blue: 102 };
+  const gray = { _obj: 'RGBColor', red: 128, green: 136, blue: 144 };
+  const first = '强攻1号舱\r';
+  const second = '5件红色机甲\r\n';
+  const third = '持续😀';
+  const contents = first + second + third;
+  const descriptor = { textKey: { textKey: contents, textStyleRange: [
+    { from: 0, to: first.length, textStyle: { color: green } },
+    { from: first.length, to: first.length + second.length, textStyle: { baseParentStyle: { color: gray } } },
+    { from: first.length + second.length, to: contents.length, textStyle: { color: green } }
+  ] } };
+  const host = snapshotHost({ 7110: descriptor }, { layerIds: [7110],
+    textItems: { 7110: { contents } } });
+  const layer = host.api.createSnapshot('document-root').root.children[0];
+  assert.equal(layer.text.value, '强攻1号舱\n5件红色机甲\n持续😀');
+  assert.equal(layer.text.renderValue, '<color=#009966FF>强攻1号舱\n</color>'
+    + '<color=#808890FF>5件红色机甲\n</color><color=#009966FF>持续😀</color>');
+  assert.equal(layer.text.renderValue.replace(/<[^>]+>/g, ''), layer.text.value);
+  const manifest = core.executeAuthoringCommand(null, { command: 'initialize-document', input: {
+    resourceNaming: 'source', name: '文字混色', rootLayerId: 'document-root', rootLayerName: '文字混色',
+    width: 720, height: 1560, snapshot: { root: { ...host.api.createSnapshot('document-root').root } }
+  } }, { actor: 'human-panel' }).manifest;
+  const bundle = core.buildBundle(manifest, host.api.createSnapshot('document-root'));
+  assert.equal(bundle.root.children[0].text.value, layer.text.value);
+  assert.equal(bundle.root.children[0].text.renderValue, layer.text.renderValue);
+});
+
+test('混色范围不可靠或包含 Unity 标签时不生成 renderValue，并报告警告', () => {
+  const red = { _obj: 'RGBColor', red: 255, green: 0, blue: 0 };
+  const blue = { _obj: 'RGBColor', red: 0, green: 0, blue: 255 };
+  const ranges = (end) => [
+    { from: 0, to: 1, textStyle: { color: red } },
+    { from: 1, to: end, textStyle: { color: blue } }
+  ];
+  const cases = [
+    { value: 'a<b>', descriptorValue: 'a<b>', styles: ranges(4), reason: /< 字符/ },
+    { value: 'a😀', descriptorValue: 'a😀', styles: [
+      { from: 0, to: 2, textStyle: { color: red } },
+      { from: 2, to: 3, textStyle: { color: blue } }], reason: /Unicode 字符/ },
+    { value: 'a\r\nb', descriptorValue: 'a\r\nb', styles: [
+      { from: 0, to: 2, textStyle: { color: red } },
+      { from: 2, to: 4, textStyle: { color: blue } }], reason: /换行/ },
+    { value: 'ab', descriptorValue: 'ac', styles: ranges(2), reason: /不一致/ },
+    { value: 'ab', descriptorValue: 'ab', styles: [ranges(2)[0],
+      { from: 2, to: 3, textStyle: { color: blue } }], reason: /不连续或越界/ },
+    { value: 'ab', descriptorValue: 'ab', styles: [ranges(2)[0],
+      { from: 1, to: 2, textStyle: {} }], reason: /缺少可继承/ },
+    { value: 'ab', descriptorValue: 'ab', styles: [
+      { from: 0, to: 1, textStyle: { color: { _obj: 'CMYKColor', cyan: 1 } } },
+      { from: 1, to: 2, textStyle: {} }], reason: /没有可用的 RGB/ }
+  ];
+  for (const sample of cases) {
+    const host = snapshotHost({ 7110: { textKey: {
+      textKey: sample.descriptorValue, textStyleRange: sample.styles
+    } } }, { layerIds: [7110], textItems: { 7110: { contents: sample.value } } });
+    const text = host.api.createSnapshot('document-root').root.children[0].text;
+    assert.equal(text.renderValue, undefined, sample.reason.source);
+    assert.match(text.renderWarning, sample.reason);
+  }
+});
+
+test('后段颜色单独改变会更新富文本和源样式签名，图层填充效果跳过逐字颜色', () => {
+  const red = { _obj: 'RGBColor', red: 255, green: 0, blue: 0 };
+  const blue = { _obj: 'RGBColor', red: 0, green: 0, blue: 255 };
+  const green = { _obj: 'RGBColor', red: 0, green: 255, blue: 0 };
+  const descriptor = { textKey: { textKey: '甲乙', textStyleRange: [
+    { from: 0, to: 1, textStyle: { color: red } },
+    { from: 1, to: 2, textStyle: { color: blue } }
+  ] } };
+  const host = snapshotHost({ 7110: descriptor }, { layerIds: [7110], textItems: { 7110: { contents: '甲乙' } } });
+  const before = host.api.createSnapshot('document-root').root.children[0];
+  descriptor.textKey.textStyleRange[1].textStyle.color = green;
+  const after = host.api.createSnapshot('document-root').root.children[0];
+  assert.notEqual(after.text.renderValue, before.text.renderValue);
+  assert.notEqual(after.styleSignature, before.styleSignature);
+  descriptor.layerEffects = { gradientFill: { enabled: true, present: true } };
+  const withFill = host.api.createSnapshot('document-root').root.children[0].text;
+  assert.equal(withFill.renderValue, undefined);
+  assert.match(withFill.renderWarning, /填充效果/);
+});
+
+test('描述符仅多一个结尾回车时按 DOM 正文截断，不把终止符写入富文本', () => {
+  const descriptor = { textKey: { textKey: '甲乙\r', textStyleRange: [
+    { from: 0, to: 1, textStyle: { color: { _obj: 'RGBColor', red: 255, green: 0, blue: 0 } } },
+    { from: 1, to: 4, textStyle: { color: { _obj: 'RGBColor', red: 0, green: 0, blue: 255 } } }
+  ] } };
+  const host = snapshotHost({ 7110: descriptor }, { layerIds: [7110], textItems: { 7110: { contents: '甲乙' } } });
+  const text = host.api.createSnapshot('document-root').root.children[0].text;
+  assert.equal(text.value, '甲乙');
+  assert.equal(text.renderValue, '<color=#FF0000FF>甲</color><color=#0000FFFF>乙</color>');
+});
+
+test('仅覆盖 Photoshop 结尾标记的样式段不需要 RGB 字色', () => {
+  const descriptor = { textKey: { textKey: '甲乙\r', textStyleRange: [
+    { from: 0, to: 1, textStyle: { color: { _obj: 'RGBColor', red: 255, green: 0, blue: 0 } } },
+    { from: 1, to: 2, textStyle: { color: { _obj: 'RGBColor', red: 0, green: 0, blue: 255 } } },
+    { from: 2, to: 4, textStyle: {} }
+  ] } };
+  const host = snapshotHost({ 7110: descriptor }, { layerIds: [7110], textItems: { 7110: { contents: '甲乙' } } });
+  const text = host.api.createSnapshot('document-root').root.children[0].text;
+  assert.equal(text.renderValue, '<color=#FF0000FF>甲</color><color=#0000FFFF>乙</color>');
+  assert.equal(text.renderWarning, undefined);
+});
+
+test('可见文字统一字体读取继承的 PostScript 名，忽略 Photoshop 结尾标记', () => {
+  const descriptor = { textKey: { textKey: '甲乙\r', textStyleRange: [
+    { from: 0, to: 1, textStyle: { fontPostScriptName: 'FZHTJW', fontAvailable: false } },
+    { from: 1, to: 2, textStyle: { baseParentStyle: { fontPostScriptName: 'FZHTJW' } } },
+    { from: 2, to: 4, textStyle: { fontPostScriptName: 'AlibabaPuHuiTi-Heavy' } }
+  ] } };
+  const host = snapshotHost({ 7110: descriptor }, { layerIds: [7110], textItems: { 7110: { contents: '甲乙' } } });
+  const layer = host.api.createSnapshot('document-root').root.children[0];
+  assert.equal(layer.text.fontPostScriptName, 'FZHTJW');
+  assert.equal(layer.text.fontWarning, undefined);
+  assert.equal(JSON.parse(layer.styleSignature).textSource.styles[1].fontPostScriptName, 'FZHTJW');
+});
+
+test('同层多字体或不可靠样式范围只报告诊断，不推断单一字体', () => {
+  const heavy = { fontPostScriptName: 'AlibabaPuHuiTi-Heavy' };
+  const medium = { fontPostScriptName: 'AlibabaPuHuiTi-Medium' };
+  const cases = [
+    { source: '甲乙', value: '甲乙', styles: [
+      { from: 0, to: 1, textStyle: heavy }, { from: 1, to: 2, textStyle: medium }
+    ], reason: /多个字体/ },
+    { source: '甲乙', value: '甲乙', styles: [
+      { from: 0, to: 1, textStyle: heavy }, { from: 2, to: 3, textStyle: heavy }
+    ], reason: /不连续或越界/ },
+    { source: '甲乙', value: '甲丙', styles: [
+      { from: 0, to: 2, textStyle: heavy }
+    ], reason: /不一致/ },
+    { source: '甲😀', value: '甲😀', styles: [
+      { from: 0, to: 2, textStyle: heavy }, { from: 2, to: 3, textStyle: heavy }
+    ], reason: /Unicode 字符/ },
+    { source: '甲\r\n乙', value: '甲\r\n乙', styles: [
+      { from: 0, to: 2, textStyle: heavy }, { from: 2, to: 4, textStyle: heavy }
+    ], reason: /换行/ },
+    { source: '甲乙', value: '甲乙', styles: [
+      { from: 0, to: 1, textStyle: heavy }, { from: 1, to: 2, textStyle: {} }
+    ], reason: /缺少可继承/ },
+    { source: undefined, value: '甲乙', styles: [
+      { from: 0, to: 2, textStyle: heavy }
+    ], reason: /完整文字样式范围/ }
+  ];
+  for (const sample of cases) {
+    const host = snapshotHost({ 7110: { textKey: {
+      textKey: sample.source, textStyleRange: sample.styles
+    } } }, { layerIds: [7110], textItems: { 7110: { contents: sample.value } } });
+    const snapshot = host.api.createSnapshot('document-root');
+    const layer = snapshot.root.children[0];
+    assert.equal(layer.text.fontPostScriptName, undefined, sample.reason.source);
+    assert.match(layer.text.fontWarning, sample.reason);
+    const manifest = core.executeAuthoringCommand(null, { command: 'initialize-document', input: {
+      resourceNaming: 'source', name: '字体诊断', rootLayerId: 'document-root', rootLayerName: '字体诊断',
+      width: 720, height: 1560, snapshot
+    } }, { actor: 'human-panel' }).manifest;
+    const bundle = core.buildBundle(manifest, snapshot);
+    assert.equal(bundle.root.children[0].text.fontKey, 'default');
+    assert.equal(bundle.root.children[0].text.fontPostScriptName, undefined);
+    assert.ok(bundle.diagnostics.some((entry) => entry.code === 'PSD2UI_TEXT_FONT_UNRESOLVED'
+      && sample.reason.test(entry.message)));
+  }
+});
+
 test('自由变换后的文字采用真实 impliedFontSize 与 impliedLeading，不以图层边界拟合字号', () => {
   const transform = { xx: 0.7383444338725024, xy: 0, yx: 0, yy: 0.7519765739385065, tx: 0, ty: 0 };
   const textKey = (font, rawSize, impliedSize) => ({ textKey: { transform, textStyleRange: [{
@@ -134,6 +298,7 @@ test('自由变换后的文字采用真实 impliedFontSize 与 impliedLeading，
   assert.equal(source.styles[0].fontPostScriptName, 'AlibabaPuHuiTi-Heavy');
   assert.equal(source.styles[0].size._value, 45.21417999267578);
   assert.equal(time.text.fontKey, undefined);
+  assert.match(time.text.fontWarning, /样式范围/);
   assert.equal(time.bounds.bottom - time.bounds.top, 61);
 });
 
@@ -148,6 +313,15 @@ test('descriptor points 按文档分辨率转像素，已为 pixels 的值不重
     assert.equal(layer.text.fontSize, 24);
     assert.equal(layer.text.lineSpacing, 1.5);
   }
+});
+
+test('异常小的 Photoshop 行距不会在 Unity 生成重叠文字', () => {
+  const descriptor = { textKey: { textStyleRange: [{ textStyle: {
+    impliedFontSize: { _unit: 'pixelsUnit', _value: 40 },
+    impliedLeading: { _unit: 'pixelsUnit', _value: 0.5 }
+  } }] } };
+  const host = snapshotHost({ 7110: descriptor }, { layerIds: [7110] });
+  assert.equal(host.api.createSnapshot('document-root').root.children[0].text.lineSpacing, 1);
 });
 
 test('文字排版类型采用 DOM 布尔事实，优先于 descriptor，换行不改变点文本类型', () => {

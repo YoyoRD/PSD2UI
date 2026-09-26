@@ -83,7 +83,7 @@ function harness(options = {}) {
   }
   const unit = value => ({ value: Number(value), as: () => Number(value) });
   let nextId = 1000;
-  const calls = [], files = new Map(), snapshots = new Map();
+  const calls = [], historyReads = [], files = new Map(), snapshots = new Map();
   const documents = [];
   const blendModes = Object.fromEntries(['NORMAL', 'PASSTHROUGH', 'MULTIPLY'].map(key => [key, `BlendMode.${key}`]));
   const placements = Object.fromEntries(['PLACEATBEGINNING', 'PLACEATEND', 'PLACEBEFORE', 'PLACEAFTER'].map(key => [key, key]));
@@ -104,7 +104,7 @@ function harness(options = {}) {
   };
   function rootOf(layer) { let current = layer; while (current.typename !== 'Document') current = current.parent; return current; }
   function flatten(layers) { return layers.flatMap(layer => [layer, ...flatten(layer.layers || [])]); }
-  function cloneLayer(layer, parent) { return createLayer({ name: layer.name, kind: layer.kind, typename: layer.typename, bounds: [...layer.bounds], visible: layer.visible, children: (layer.layers || []).map(child => ({ name: child.name, kind: child.kind, bounds: [...child.bounds] })) }, parent); }
+  function cloneLayer(layer, parent) { return createLayer({ name: layer.name, kind: layer.kind, typename: layer.typename, bounds: [...layer.bounds], visible: layer.visible, opacity: layer.opacity, children: (layer.layers || []).map(child => ({ name: child.name, kind: child.kind, bounds: [...child.bounds] })) }, parent); }
   function createLayer(spec = {}, parent) {
     const layer = {
       id: spec.id || nextId++, name: spec.name || 'Layer', kind: spec.kind || 'LayerKind.NORMAL', typename: spec.typename || (spec.children ? 'LayerSet' : 'ArtLayer'),
@@ -164,7 +164,8 @@ function harness(options = {}) {
     descriptor.put('mode', types.ENUMERATEDTYPE, { type: 'blendMode', value: layer.blendMode.split('.').at(-1).toLowerCase() });
     for (const key of ['bounds', 'boundsNoEffects']) {
       const area = new Descriptor();
-      ['left', 'top', 'right', 'bottom'].forEach((name, index) => area.put(name, types.UNITDOUBLE, { unit: 'pixelsUnit', number: layer[key][index] }));
+      const amBounds = layer.amBounds && layer.amBounds[key] || layer[key];
+      ['left', 'top', 'right', 'bottom'].forEach((name, index) => area.put(name, types.UNITDOUBLE, { unit: 'pixelsUnit', number: amBounds[index] }));
       descriptor.put(key, types.OBJECTTYPE, { type: 'rectangle', value: area });
     }
     Object.assign(descriptor.entries, layer.customDescriptor || {}); return descriptor;
@@ -181,6 +182,9 @@ function harness(options = {}) {
     const part = reference.parts.find(entry => entry.type === 'document');
     const document = part ? documents.find(item => item.id === part.value) : active;
     if (reference.parts.some(entry => entry.type === 'historyState')) {
+      historyReads.push({ documentId: document.id, scoped: Boolean(part) });
+      if (part && options.rejectScopedHistory) throw new Error('The command Get is not currently available.');
+      if (!part && options.failActiveHistory === document.id) throw new Error('Injected active history read failure');
       const descriptor = new Descriptor();
       descriptor.put('ID', types.INTEGERTYPE, document.historyId || 1);
       return descriptor;
@@ -190,6 +194,13 @@ function harness(options = {}) {
       const descriptor = new Descriptor();
       if (property.value === 'targetLayersIDs') {
         descriptor.put('targetLayersIDs', types.LISTTYPE, new List(document.selected.map(id => { const value = new Reference(); value.putIdentifier('layer', id); return { type: types.REFERENCETYPE, value }; })));
+      }
+      if (property.value === 'visible' || property.value === 'name') {
+        const target = reference.parts.find(entry => entry.type === 'layer');
+        const layer = flatten(document.layers).find(item => item.id === target.value);
+        if (!layer) throw new Error('Missing layer');
+        if (property.value === 'name') descriptor.put('name', types.STRINGTYPE, layer.name);
+        else descriptor.put('visible', types.BOOLEANTYPE, layer.visible);
       }
       if (property.value === 'numberOfLayers') {
         let count = layerRecords(document).length;
@@ -250,7 +261,7 @@ function harness(options = {}) {
     if (!(this instanceof File)) return new File(name);
     this.fsName = name; this.exists = files.has(name);
     this.name = path.posix.basename(name); this.parent = { fsName: path.posix.dirname(name) };
-    this.length = String(files.get(name) || '').length;
+    this.length = options.fileLength != null ? options.fileLength : Buffer.byteLength(String(files.get(name) || ''), 'utf8');
     this.open = () => this.exists; this.read = () => files.get(name); this.close = () => {};
   }
   function XMPMeta(raw) { this.values = raw ? JSON.parse(raw) : {}; }
@@ -259,6 +270,7 @@ function harness(options = {}) {
   XMPMeta.prototype.setProperty = function (uri, key, value) { this.values[uri + key] = value; };
   XMPMeta.prototype.serialize = function () { return JSON.stringify(this.values); };
   const sandbox = {
+    ...(options.clock ? { Date: options.clock } : {}),
     $, app, ActionDescriptor: Descriptor, ActionReference: Reference, DescValueType: types, ReferenceFormType: forms,
     executeAction, executeActionGet, UnitValue: function (value) { return unit(value); }, File,
     Folder: { temp: { fsName: 'F:/Temp' }, selectDialog: () => options.folder ? { fsName: options.folder } : null },
@@ -271,8 +283,61 @@ function harness(options = {}) {
   function $(unused) { return unused; }
   vm.runInNewContext(source, sandbox, { filename: hostPath });
   function rpc(method, params = {}) { return JSON.parse(sandbox.$.PSD2UIHost.dispatch(JSON.stringify({ method, params }))); }
-  return { rpc, raw: input => JSON.parse(sandbox.$.PSD2UIHost.dispatch(input)), fromFile: file => JSON.parse(sandbox.$.PSD2UIHost.dispatchFile(file)), codec: sandbox.$.PSD2UIHost.json, app, calls, createDocument, files, snapshots, types, Descriptor, List };
+  return { rpc, raw: input => JSON.parse(sandbox.$.PSD2UIHost.dispatch(input)), fromFile: file => JSON.parse(sandbox.$.PSD2UIHost.dispatchFile(file)), codec: sandbox.$.PSD2UIHost.json, app, calls, historyReads, createDocument, files, snapshots, types, Descriptor, List };
 }
+
+test('Photoshop 2020 probe reads active history without unsupported document containers or activation', () => {
+  const h = harness({ version: '21.2.3', rejectScopedHistory: true });
+  const doc = h.createDocument(); doc.historyId = 226;
+  const result = h.rpc('probe');
+  assert.equal(result.ok, true);
+  assert.equal(result.value.documents[0].historyId, 226);
+  assert.deepEqual(h.calls, []);
+  assert.deepEqual(h.historyReads, [{ documentId: doc.id, scoped: false }]);
+});
+
+test('Photoshop 2020 inactive history uses cached revisions and rechecks on activation without activating during probes', () => {
+  const h = harness({ version: '21.2.3', rejectScopedHistory: true });
+  const first = h.createDocument({ id: 11 }); first.historyId = 100;
+  const second = h.createDocument({ id: 22 }); second.historyId = 200;
+  const selected = [first.selected.slice(), second.selected.slice()];
+  for (let index = 0; index < 2; index++) {
+    const result = h.rpc('probe');
+    assert.equal(result.ok, true);
+    assert.equal(result.value.activeDocumentId, second.id);
+    assert.deepEqual(result.value.documents.map(doc => doc.historyId), ['inactive:11', 200]);
+    assert.equal(h.app.activeDocument, second);
+    assert.deepEqual([first.selected, second.selected], selected);
+  }
+  assert.equal(h.historyReads.filter(read => read.scoped).length, 1);
+  assert.deepEqual(h.calls, []);
+  h.app.activeDocument = first; h.calls.length = 0;
+  second.historyId = 300;
+  assert.deepEqual(h.rpc('probe').value.documents.map(doc => doc.historyId), [100, 200]);
+  assert.deepEqual(h.calls, []);
+  h.app.activeDocument = second; h.calls.length = 0;
+  assert.deepEqual(h.rpc('probe').value.documents.map(doc => doc.historyId), [100, 300]);
+  assert.deepEqual(h.calls, []);
+});
+
+test('Photoshop 2020 failed active history reads do not change focus', () => {
+  const h = harness({ rejectScopedHistory: true, failActiveHistory: 22 });
+  h.createDocument({ id: 11 }); const second = h.createDocument({ id: 22 });
+  const result = h.rpc('probe');
+  assert.equal(result.ok, false);
+  assert.match(result.error.message, /Injected active history read failure/);
+  assert.equal(h.app.activeDocument, second);
+  assert.deepEqual(h.calls, []);
+});
+
+test('Photoshop 2020 clears closed document history entries before an ID is reused', () => {
+  const h = harness({ rejectScopedHistory: true });
+  const first = h.createDocument({ id: 11 }); first.historyId = 100;
+  h.rpc('probe'); first.close(); h.rpc('probe');
+  h.createDocument({ id: 11 }); h.createDocument({ id: 22 }); h.calls.length = 0;
+  assert.equal(h.rpc('probe').value.documents[0].historyId, 'inactive:11');
+  assert.deepEqual(h.calls, []);
+});
 
 test('state reads complete text/AM data without activating documents or changing selection', () => {
   const h = harness(), t = h.types;
@@ -289,6 +354,60 @@ test('state reads complete text/AM data without activating documents or changing
   assert.deepEqual(layer.descriptor.textKey.textStyleRange[0].textStyle.impliedFontSize, { _unit: 'pointsUnit', _value: 20 });
   assert.deepEqual(layer.descriptor.mode, { _enum: 'blendMode', _value: 'multiply' });
   assert.deepEqual(response.value.documents[1].activeLayerIds, []);
+});
+
+test('CEP state retains every Photoshop text style range and inherited RGB descriptor', () => {
+  const h = harness(), t = h.types;
+  const color = (red, green, blue) => new h.Descriptor({
+    red: { type: t.DOUBLETYPE, value: red }, green: { type: t.DOUBLETYPE, value: green },
+    blue: { type: t.DOUBLETYPE, value: blue }
+  });
+  const range = (from, to, rgb) => ({ type: t.OBJECTTYPE, value: {
+    type: 'textStyleRange', value: new h.Descriptor({
+      from: { type: t.INTEGERTYPE, value: from }, to: { type: t.INTEGERTYPE, value: to },
+      textStyle: { type: t.OBJECTTYPE, value: { type: 'textStyle', value: new h.Descriptor({
+        baseParentStyle: { type: t.OBJECTTYPE, value: { type: 'textStyle', value: new h.Descriptor({
+          color: { type: t.OBJECTTYPE, value: { type: 'RGBColor', value: rgb } },
+          fontPostScriptName: { type: t.STRINGTYPE, value: 'FZHTJW' }
+        }) } }
+      }) } }
+    })
+  } });
+  const textKey = new h.Descriptor({
+    textKey: { type: t.STRINGTYPE, value: '甲乙' },
+    textStyleRange: { type: t.LISTTYPE, value: new h.List([
+      range(0, 1, color(0, 153, 102)), range(1, 2, color(128, 136, 144))
+    ]) }
+  });
+  h.createDocument({ layers: [{ kind: 'LayerKind.TEXT', descriptor: {
+    textKey: { type: t.OBJECTTYPE, value: { type: 'textLayer', value: textKey } }
+  }, textItem: { contents: '甲乙', size: 20, leading: 24, kind: 'TextType.POINTTEXT',
+    color: { rgb: { red: 0, green: 153, blue: 102 } } } }] });
+  const response = h.rpc('state');
+  assert.equal(response.ok, true);
+  const text = response.value.documents[0].layers[0].descriptor.textKey;
+  assert.equal(text.textKey, '甲乙');
+  assert.deepEqual(text.textStyleRange.map((entry) => [entry.from, entry.to]), [[0, 1], [1, 2]]);
+  assert.deepEqual(text.textStyleRange[1].textStyle.baseParentStyle.color,
+    { _obj: 'RGBColor', red: 128, green: 136, blue: 144 });
+  assert.equal(text.textStyleRange[1].textStyle.baseParentStyle.fontPostScriptName, 'FZHTJW');
+});
+
+test('additive selection touches only new IDs and validates all targets before selecting', () => {
+  const h = harness(), doc = h.createDocument({ layers: Array.from({ length: 12 }, (_, i) => ({ name: 'Layer' + i })) });
+  doc.selected = [];
+  for (const layer of doc.layers) {
+    const result = h.raw(JSON.stringify({ method: 'select', deferState: true,
+      params: { documentId: doc.id, layerIds: [layer.id], add: true } }));
+    assert.equal(result.ok, true);
+  }
+  assert.deepEqual(doc.selected, doc.layers.map(layer => layer.id));
+  assert.equal(h.calls.filter(call => call[0] === 'action' && call[1] === 'select').length, 12);
+  const invalid = h.rpc('select', { documentId: doc.id, layerIds: [doc.layers[1].id, -1], add: false });
+  assert.equal(invalid.ok, false);
+  assert.equal(doc.selected.length, 12);
+  h.rpc('select', { documentId: doc.id, layerIds: [doc.layers[1].id], add: true });
+  assert.equal(h.calls.filter(call => call[0] === 'action' && call[1] === 'select').length, 12);
 });
 
 test('state pages preserve all layers and never read large document XMP', () => {
@@ -377,6 +496,28 @@ test('indexed pages preserve empty/nested groups, background index zero and DOM 
   assert.deepEqual(response.value.items[0].layer.bounds, { left: 2, top: 3, right: 18, bottom: 19 });
 });
 
+test('interactive snapshots never access rendered group bounds; geometry RPC reads only the requested group', () => {
+  const h = harness(), doc = h.createDocument({ layers: [{ name: 'Group', children: [{ name: 'Child' }] }, { name: 'Other', children: [] }] });
+  let domReads = 0;
+  for (const group of doc.layers) {
+    group.amBounds = { bounds: [0, 0, 1024, 2048], boundsNoEffects: [0, 0, 1024, 2048] };
+    for (const key of ['bounds', 'boundsNoEffects']) Object.defineProperty(group, key, { get() { domReads++; return [2, 3, 18, 19]; } });
+  }
+  const start = h.rpc('beginState', { deferGeometry: true }).value;
+  const page = h.rpc('statePage', { token: start.token });
+  assert.equal(page.ok, true, JSON.stringify(page.error));
+  assert.equal(domReads, 0);
+  assert.equal(page.value.items[0].layer.deferredBounds, true);
+  const geometry = h.rpc('readGeometry', { documentId: doc.id, layerIds: [doc.layers[0].id], stamp: start.stamp });
+  assert.equal(geometry.ok, true, JSON.stringify(geometry.error));
+  assert.equal(geometry.state, null);
+  assert.equal(domReads, 2);
+  assert.deepEqual(geometry.value.layers[0].bounds, { left: 2, top: 3, right: 18, bottom: 19 });
+  doc.historyId = 2;
+  assert.equal(h.rpc('readGeometry', { documentId: doc.id, layerIds: [doc.layers[1].id], stamp: start.stamp }).error.code, 'PSD2UI_STATE_CHANGED');
+  assert.equal(domReads, 2);
+});
+
 test('JSON codec roundtrips long XML, escapes and Unicode across chunk boundaries', () => {
   const h = harness();
   const value = { xmp: '<tag value="美术\\文档">\n\t\u0000\u2028\u2029🦆</tag>'.repeat(10000) };
@@ -409,6 +550,47 @@ test('file RPC accepts only staged JSON and keeps the fixed command and deferred
   assert.equal(h.fromFile(file).error.code, 'PSD2UI_UNKNOWN_COMMAND');
   for (const bad of ['F:/Art/secret.json', 'F:/Temp/PSD2UI-CEP-rpc/other.json', 'F:/Temp/PSD2UI-CEP-rpc/' + 'b'.repeat(32) + '.json']) {
     assert.equal(h.fromFile(bad).error.code, 'PSD2UI_INVALID_REQUEST_FILE');
+  }
+});
+
+test('staged validated Manifest bypasses ES3 JSON parsing and preserves exact XMP readback and receipt', () => {
+  const h = harness(), doc = h.createDocument({ xmp: '{"other":"unchanged"}' });
+  const file = 'F:/Temp/PSD2UI-CEP-rpc/' + 'a'.repeat(32) + '.manifest.json';
+  // A deeply nested valid JSON value cannot pass the legacy recursive parser.
+  const serialized = '{"nested":'.repeat(3000) + JSON.stringify('文"\\\n\u2028🦆') + '}'.repeat(3000);
+  h.files.set(file, serialized);
+  const response = h.raw(JSON.stringify({ method: 'writeManifest', params: { documentID: doc.id,
+    serializedManifestFile: file, serializedManifestLength: serialized.length, validated: true }, deferState: true }));
+  assert.equal(response.ok, true, JSON.stringify(response.error));
+  assert.equal(response.state, null);
+  assert.deepEqual(response.value, { verified: true, documentId: doc.id, serializedLength: serialized.length });
+  assert.equal(h.rpc('readManifest', { documentId: doc.id, serialized: true }).value, serialized);
+  assert.equal(JSON.parse(doc.xmpMetadata.rawData).other, 'unchanged');
+});
+
+test('staged Manifest paths, identity metadata, length and size are checked before writing XMP', () => {
+  const file = 'F:/Temp/PSD2UI-CEP-rpc/' + 'a'.repeat(32) + '.manifest.json';
+  for (const override of [
+    { serializedManifestFile: 'F:/Art/secret.manifest.json' },
+    { serializedManifestFile: 'F:/Temp/PSD2UI-CEP-rpc/not-owned.manifest.json' },
+    { serializedManifestFile: 'F:/Temp/PSD2UI-CEP-rpc/' + 'a'.repeat(32) + '.json' },
+    { serializedManifestLength: 8 }, { serializedManifestLength: '7' }, { serializedManifestLength: 7.5 },
+    { validated: false }, { serializedManifest: '{}' }, { manifest: {} }
+  ]) {
+    const h = harness(), doc = h.createDocument({ xmp: '{"original":true}' });
+    h.files.set(file, '{"x":1}');
+    const result = h.rpc('writeManifest', { documentId: doc.id, serializedManifestFile: file,
+      serializedManifestLength: 7, validated: true, ...override });
+    assert.equal(result.ok, false, JSON.stringify(override));
+    assert.match(result.error.code, /^PSD2UI_INVALID_(?:REQUEST|MANIFEST)_FILE$/);
+    assert.equal(doc.xmpMetadata.rawData, '{"original":true}');
+  }
+  for (const options of [{}, { fileLength: 64 * 1024 * 1024 + 1 }]) {
+    const h = harness(options), doc = h.createDocument({ xmp: '{"original":true}' });
+    if (options.fileLength) h.files.set(file, '{"x":1}');
+    const result = h.rpc('writeManifest', { documentId: doc.id, serializedManifestFile: file, serializedManifestLength: 7, validated: true });
+    assert.equal(result.error.code, 'PSD2UI_INVALID_REQUEST_FILE');
+    assert.equal(doc.xmpMetadata.rawData, '{"original":true}');
   }
 });
 
@@ -518,6 +700,127 @@ test('pixel export uses an independent document and restores source on failure',
   }
 });
 
+test('single-call layer PNG export isolates each resource and returns only restored document headers', () => {
+  const h = harness({ version: '21.2.3', rejectScopedHistory: true });
+  const doc = h.createDocument({ path: 'F:/Art/Source.psd', width: 720, height: 1560,
+    layers: [{ name: 'Hidden', visible: false, opacity: 25, bounds: [-8, 17, 24, 49] }] });
+  const other = h.createDocument({ name: 'Other' });
+  const before = { bounds: [...doc.layers[0].bounds], selected: [...doc.selected], xmp: doc.xmpMetadata.rawData };
+  const added = [], add = h.app.documents.add;
+  h.app.documents.add = (...args) => { const workbench = add(...args); added.push(workbench); return workbench; };
+  for (let index = 0; index < 2; index++) {
+    const response = h.rpc('exportLayerPng', { documentId: doc.id, layerId: doc.layers[0].id,
+      expectedHistoryId: 1, sourceBounds: { left: -8, top: 17 }, path: `F:/Temp/resource-${index}.png`, compression: 6 });
+    assert.equal(response.ok, true, JSON.stringify(response));
+    const value = response.value, workbench = added[index], copied = workbench.layers[0];
+    assert.equal(value.documentId, doc.id); assert.equal(value.layerId, doc.layers[0].id);
+    assert.equal(value.closed, true); assert.equal(value.activeDocumentId, doc.id);
+    assert.equal(value.temporaryDocumentId, workbench.id); assert.equal(value.width, 720); assert.equal(value.height, 1560);
+    assert.deepEqual(value.stamp.documents.map(item => item.id), [doc.id, other.id]);
+    assert.equal(value.stamp.documents.some(item => Object.hasOwn(item, 'layers')), false);
+    assert.equal(copied.visible, true); assert.equal(copied.opacity, 100);
+    assert.deepEqual(copied.bounds, [0, 0, 32, 32]);
+    assert.equal(h.calls.some(call => call[0] === 'trim' && call[1] === workbench.id), true);
+    assert.equal(h.files.has(`F:/Temp/resource-${index}.png`), true);
+  }
+  assert.notEqual(added[0].id, added[1].id);
+  assert.equal(doc.layers[0].visible, false); assert.equal(doc.layers[0].opacity, 25);
+  assert.deepEqual(doc.layers[0].bounds, before.bounds); assert.deepEqual(doc.selected, before.selected);
+  assert.equal(doc.xmpMetadata.rawData, before.xmp); assert.equal(h.app.activeDocument, doc);
+  assert.deepEqual(h.app.documents.map(item => item.id), [doc.id, other.id]);
+  assert.equal(h.calls.some(call => ['save', 'savePng', 'close', 'trim', 'translate'].includes(call[0]) && call[1] === doc.id), false);
+});
+
+test('layer export rejects stale source history before creating a document or writing a PNG', () => {
+  const h = harness(), doc = h.createDocument(); doc.historyId = 7;
+  for (const expectedHistoryId of [undefined, 6]) {
+    const response = h.rpc('exportLayerPng', { documentId: doc.id, layerId: doc.layers[0].id,
+      expectedHistoryId, sourceBounds: { left: 2, top: 3 }, path: 'F:/Temp/stale.png' });
+    assert.equal(response.ok, false); assert.equal(response.error.code, 'PSD2UI_STATE_CHANGED');
+    assert.deepEqual(Array.from(h.app.documents), [doc]); assert.equal(h.files.size, 0);
+    assert.equal(h.calls.some(call => ['duplicateLayer', 'savePng', 'close'].includes(call[0])), false);
+  }
+});
+
+test('layer export closes only its owned workbench after duplicate, translate, trim or save failure', () => {
+  for (const stage of ['duplicate', 'translate', 'trim', 'save']) {
+    const h = harness({ failSavePng: stage === 'save' }), doc = h.createDocument({ path: 'F:/Art/Source.psd' });
+    const other = h.createDocument({ path: 'F:/Art/Other.psd' }), add = h.app.documents.add;
+    const duplicate = doc.layers[0].duplicate;
+    doc.layers[0].duplicate = function (...args) {
+      if (stage === 'duplicate') throw new Error('Injected duplicate failure');
+      const copied = duplicate.apply(this, args);
+      if (stage === 'translate') copied.translate = () => { throw new Error('Injected translate failure'); };
+      return copied;
+    };
+    h.app.documents.add = (...args) => {
+      const result = add(...args);
+      if (stage === 'trim') result.trim = () => { throw new Error('Injected trim failure'); };
+      return result;
+    };
+    const response = h.rpc('exportLayerPng', { documentId: doc.id, layerId: doc.layers[0].id,
+      expectedHistoryId: 1, sourceBounds: { left: 2, top: 3 }, path: 'F:/Temp/failed.png' });
+    assert.equal(response.ok, false, stage);
+    assert.deepEqual(h.app.documents.map(item => item.id), [doc.id, other.id]); assert.equal(h.app.activeDocument, doc);
+    assert.equal(h.calls.filter(call => call[0] === 'close').length, 1);
+    assert.equal(h.calls.some(call => call[0] === 'close' && [doc.id, other.id].includes(call[1])), false);
+  }
+});
+
+test('layer export never modifies or closes a reused document or a returned source-layer alias', () => {
+  for (const alias of ['document', 'layer']) {
+    const h = harness(), doc = h.createDocument({ layers: [{ visible: false, opacity: 25 }] });
+    if (alias === 'document') h.app.documents.add = () => doc;
+    else doc.layers[0].duplicate = () => doc.layers[0];
+    const response = h.rpc('exportLayerPng', { documentId: doc.id, layerId: doc.layers[0].id,
+      expectedHistoryId: 1, sourceBounds: { left: 2, top: 3 }, path: 'F:/Temp/alias.png' });
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, alias === 'document' ? 'PSD2UI_TEMP_DOCUMENT_CREATE_FAILED' : 'PSD2UI_TEMP_LAYER_MISMATCH');
+    assert.equal(doc.layers[0].visible, false); assert.equal(doc.layers[0].opacity, 25);
+    assert.deepEqual(Array.from(h.app.documents), [doc]); assert.equal(h.files.size, 0);
+    assert.equal(h.calls.some(call => call[0] === 'close' && call[1] === doc.id), false);
+  }
+});
+
+test('layer export restores source and reports failure when workbench cleanup fails', () => {
+  const h = harness(), doc = h.createDocument(), add = h.app.documents.add;
+  h.app.documents.add = (...args) => {
+    const workbench = add(...args); workbench.close = () => { throw new Error('Injected close failure'); }; return workbench;
+  };
+  const response = h.rpc('exportLayerPng', { documentId: doc.id, layerId: doc.layers[0].id,
+    expectedHistoryId: 1, sourceBounds: { left: 2, top: 3 }, path: 'F:/Temp/cleanup.png' });
+  assert.equal(response.ok, false); assert.match(response.error.message, /Injected close failure/);
+  assert.equal(h.app.activeDocument, doc); assert.equal(h.app.documents.includes(doc), true);
+});
+
+test('layer export translates by supplied AM bounds without reading different DOM bounds', () => {
+  const h = harness(), doc = h.createDocument({ layers: [{ bounds: [100, 200, 116, 216] }] });
+  const layer = doc.layers[0]; let domReads = 0, copied;
+  Object.defineProperty(layer, 'bounds', { get() { domReads++; throw new Error('DOM bounds must not be read during export'); } });
+  // Photoshop 的原生复制无需通过脚本访问源图层 DOM bounds。
+  layer.duplicate = destination => {
+    copied = destination.layers[0]; copied.bounds = [100, 200, 116, 216]; copied.boundsNoEffects = copied.bounds; return copied;
+  };
+  const response = h.rpc('exportLayerPng', { documentId: doc.id, layerId: layer.id, expectedHistoryId: 1,
+    sourceBounds: { left: 8.5, top: -9 }, path: 'F:/Temp/am-bounds.png' });
+  assert.equal(response.ok, true, JSON.stringify(response)); assert.equal(domReads, 0);
+  assert.deepEqual(h.calls.find(call => call[0] === 'translate'), ['translate', copied.id, -8.5, 9]);
+  assert.deepEqual(copied.bounds, [91.5, 209, 107.5, 225]);
+  assert.equal(h.app.activeDocument, doc); assert.deepEqual(Array.from(h.app.documents), [doc]);
+});
+
+test('layer export requires nonempty finite source bounds before activation or writes', () => {
+  for (const sourceBounds of [undefined, null, {}, { left: 0 }, { left: null, top: 0 }, { left: 0, top: '' },
+    { left: '1', top: 0 }, { left: false, top: 0 }, { left: NaN, top: 0 }, { left: 0, top: Infinity }]) {
+    const h = harness(), doc = h.createDocument(), other = h.createDocument();
+    const response = h.rpc('exportLayerPng', { documentId: doc.id, layerId: doc.layers[0].id,
+      expectedHistoryId: 1, sourceBounds, path: 'F:/Temp/invalid-bounds.png' });
+    assert.equal(response.ok, false); assert.equal(response.error.code, 'PSD2UI_INVALID_ARGUMENT');
+    assert.equal(h.app.activeDocument, other); assert.equal(h.calls.length, 0); assert.equal(h.files.size, 0);
+    assert.deepEqual(Array.from(h.app.documents), [doc, other]);
+  }
+});
+
 test('pixel import preserves transparent canvas padding and only replaces an owned output layer', () => {
   const h = harness(), sourceDoc = h.createDocument({ path: 'F:/Art/Source.psd' });
   h.files.set('F:/Temp/pixels.png', { width: 32, height: 32, layers: [{ bounds: [7, 9, 20, 22] }] });
@@ -552,4 +855,43 @@ test('move, ungroup and delete keep layer IDs and refuse cycles or foreign ancho
   assert.equal(h.calls.filter(call => call[0] === 'move').slice(-1)[0][3], 'PLACEATBEGINNING');
   assert.deepEqual(h.rpc('ungroup', { documentID: doc.id, layerID: group.id }).value.childIds, [child.id]);
   assert.equal(doc.layers[0], child); assert.equal(h.rpc('delete', { documentID: doc.id, layerID: other.id }).ok, true); assert.deepEqual(doc.layers.map(layer => layer.id), [child.id]);
+});
+
+test('visibility RPC reads only visibility and ancestor bounds, returns no full snapshot and rejects stale stamps', () => {
+  const h = harness();
+  const doc = h.createDocument({ layers: [{ name: 'Group', children: [{ name: 'Child' }] }, { name: 'Untouched' }] });
+  const group = doc.layers[0], child = group.layers[0];
+  const begin = h.rpc('beginState');
+  let page; do { page = h.rpc('statePage', { token: begin.value.token }); assert.equal(page.ok, true); } while (!page.value.done);
+  child.visible = false;
+  Object.defineProperty(doc.xmpMetadata, 'rawData', { get() { throw new Error('visibility must not read XMP'); } });
+  const stamp = h.rpc('probe').value;
+  const result = h.rpc('readVisibility', { documentId: doc.id, layerIds: [child.id, group.id], groupIds: [group.id], stamp });
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.equal(result.state, null);
+  assert.equal(result.value.layers[0].visible, false);
+  assert.deepEqual(result.value.layers[1].bounds, { left: 2, top: 3, right: 18, bottom: 19 });
+  assert.equal(result.value.layers[0].descriptor, undefined);
+  child.name = 'Renamed';
+  const renamed = h.rpc('readVisibility', { documentId: doc.id, layerIds: [child.id], names: true, stamp });
+  assert.equal(renamed.value.layers[0].name, 'Renamed');
+  stamp.documents[0].historyId = 'stale';
+  const stale = h.rpc('readVisibility', { documentId: doc.id, layerIds: [child.id], stamp });
+  assert.equal(stale.ok, false); assert.equal(stale.error.code, 'PSD2UI_STATE_CHANGED');
+  assert.equal(stale.state, null);
+});
+
+test('slow state probes cannot consume the page budget and produce endless empty pages', () => {
+  let elapsed = 0;
+  function SlowClock() { this.getTime = () => { elapsed += 100; return elapsed; }; }
+  const h = harness({ clock: SlowClock });
+  const doc = h.createDocument({ layers: [{ name: 'First' }, { name: 'Second' }] });
+  const begin = h.rpc('beginState');
+  const first = h.rpc('statePage', { token: begin.value.token });
+  assert.equal(first.ok, true);
+  assert.equal(first.value.items.length, 1, 'a slow initial probe must still allow one layer');
+  const second = h.rpc('statePage', { token: begin.value.token });
+  assert.equal(second.value.items.length, 1);
+  const last = h.rpc('statePage', { token: begin.value.token });
+  assert.equal(last.value.done, true);
 });

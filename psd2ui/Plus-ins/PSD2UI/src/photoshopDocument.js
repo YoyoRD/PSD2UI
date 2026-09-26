@@ -3,6 +3,30 @@
 const { app, core, action, constants } = require('photoshop');
 const { normalizeLayerTextEffects } = require('./textEffects');
 
+let projectionDocument = null;
+let projectionRevision = null;
+let layerProjections = new WeakMap();
+const documentProjections = new WeakMap();
+
+function projectionCache() {
+  if (typeof core.getLayerRevision === 'function' && app.activeDocument) {
+    let cache = documentProjections.get(app.activeDocument);
+    if (!cache) { cache = new WeakMap(); documentProjections.set(app.activeDocument, cache); }
+    return cache;
+  }
+  const revision = typeof core.getSnapshotRevision === 'function' ? core.getSnapshotRevision() : null;
+  // UXP 和写操作期间没有稳定版本，继续读取实时数据。
+  if (revision == null) {
+    projectionRevision = null; layerProjections = new WeakMap();
+    return null;
+  }
+  if (projectionDocument !== app.activeDocument || projectionRevision !== revision) {
+    projectionDocument = app.activeDocument; projectionRevision = revision;
+    layerProjections = new WeakMap();
+  }
+  return layerProjections;
+}
+
 function asNumber(value) {
   if (value && typeof value === 'object' && value.value != null) {
     return Number(value.value);
@@ -154,7 +178,7 @@ function readTextMetrics(characterStyle, textDescriptor) {
   const lineSpacing = effectiveSize > 0 && lineAdvance > 0 ? lineAdvance / effectiveSize : 1.2;
   return {
     fontSize: Number.isFinite(effectiveSize) && effectiveSize > 0 ? Math.max(1, Math.round(effectiveSize)) : 24,
-    lineSpacing: Math.max(0.1, lineSpacing),
+    lineSpacing: Math.max(1, lineSpacing),
     ...(Number.isFinite(lineAdvance) && lineAdvance > 0 ? { lineAdvance } : {})
   };
 }
@@ -172,6 +196,170 @@ function readTextLayoutMode(layer, textDescriptor) {
   if (Array.isArray(shapes) && shapes.length > 0 && shapes.every((shape) => shape && shape.char
       && shape.char._enum === 'char' && shape.char._value === 'paint')) return 'point';
   return undefined;
+}
+
+function styleColorDescriptor(style) {
+  for (let depth = 0; style && depth < 16; depth += 1, style = style.baseParentStyle) {
+    if (Object.prototype.hasOwnProperty.call(style, 'color')) return style.color;
+  }
+  return null;
+}
+
+function styleFontPostScriptName(style) {
+  for (let depth = 0; style && depth < 16; depth += 1, style = style.baseParentStyle) {
+    if (Object.prototype.hasOwnProperty.call(style, 'fontPostScriptName')) {
+      const name = style.fontPostScriptName;
+      return typeof name === 'string' && !/[\x00-\x1F]/.test(name) ? name.trim() : '';
+    }
+  }
+  return '';
+}
+
+function rgbStyleColor(style) {
+  const value = styleColorDescriptor(style);
+  if (!value || value._obj !== 'RGBColor') return null;
+  const channels = [value.red, value.grain == null ? value.green : value.grain, value.blue]
+    .map(Number);
+  if (channels.some((channel) => !Number.isFinite(channel) || channel < 0 || channel > 255)) return null;
+  return `#${channels.map((channel) => Math.round(channel).toString(16).padStart(2, '0')).join('').toUpperCase()}FF`;
+}
+
+function normalizedTextWithBoundaries(source) {
+  const boundaries = new Array(source.length + 1);
+  const output = [];
+  boundaries[0] = 0;
+  for (let index = 0; index < source.length;) {
+    if (source[index] === '\r' && source[index + 1] === '\n') {
+      output.push('\n');
+      boundaries[index + 1] = null; // A style boundary cannot split one CRLF newline.
+      boundaries[index + 2] = output.length;
+      index += 2;
+    } else {
+      output.push(source[index] === '\r' ? '\n' : source[index]);
+      boundaries[++index] = output.length;
+    }
+  }
+  return { value: output.join(''), boundaries };
+}
+
+function splitsSurrogatePair(source, offset) {
+  return offset > 0 && offset < source.length
+    && source.charCodeAt(offset - 1) >= 0xD800 && source.charCodeAt(offset - 1) <= 0xDBFF
+    && source.charCodeAt(offset) >= 0xDC00 && source.charCodeAt(offset) <= 0xDFFF;
+}
+
+function activeFillEffect(layerEffects, descriptor) {
+  if (descriptor.layerFXVisible === false || !layerEffects) return false;
+  return ['gradientFill', 'solidFill'].some((name) => {
+    const effects = [layerEffects[name], ...(Array.isArray(layerEffects[`${name}Multi`])
+      ? layerEffects[`${name}Multi`] : [])];
+    return effects.some((effect) => effect && effect.enabled !== false && effect.present !== false);
+  });
+}
+
+function readTextFontPostScriptName(textDescriptor, plainValue) {
+  if (!plainValue) return {};
+  const source = textDescriptor && textDescriptor.textKey;
+  const ranges = textDescriptor && textDescriptor.textStyleRange;
+  const skip = (reason) => ({ fontWarning: `未能确定文字层统一字体：${reason}；该文字层将使用项目默认字体。` });
+  if (typeof source !== 'string' || !Array.isArray(ranges) || ranges.length === 0) {
+    return skip('Photoshop 未提供完整文字样式范围');
+  }
+  const normalized = normalizedTextWithBoundaries(source);
+  let displayEnd = source.length;
+  if (normalized.value !== plainValue) {
+    // Photoshop may append one paragraph marker that is absent from the DOM contents.
+    const terminalLength = source.endsWith('\r\n') ? 2 : source.endsWith('\r') ? 1 : 0;
+    const candidateEnd = source.length - terminalLength;
+    if (!terminalLength || normalized.value.slice(0, normalized.boundaries[candidateEnd]) !== plainValue) {
+      return skip('Photoshop 文字描述符与显示文本不一致');
+    }
+    displayEnd = candidateEnd;
+  }
+  const ordered = ranges.slice().sort((left, right) => Number(left.from) - Number(right.from));
+  const fonts = new Set();
+  let cursor = 0;
+  for (let index = 0; index < ordered.length; index += 1) {
+    const range = ordered[index];
+    const from = Number(range && range.from);
+    const to = Number(range && range.to);
+    const last = index === ordered.length - 1;
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from !== cursor || to <= from
+        || to > source.length + (last ? 1 : 0)) return skip('样式范围索引不连续或越界');
+    const rawEnd = Math.min(to, source.length);
+    const start = Math.min(from, displayEnd);
+    const end = Math.min(rawEnd, displayEnd);
+    if (normalized.boundaries[start] == null || normalized.boundaries[end] == null
+        || splitsSurrogatePair(source, start) || splitsSurrogatePair(source, end)) {
+      return skip('样式范围切开了换行或 Unicode 字符');
+    }
+    if (end > start) {
+      const font = styleFontPostScriptName(range.textStyle);
+      if (!font) return skip('可见文字缺少可继承的 PostScript 字体名');
+      fonts.add(font);
+    }
+    cursor = rawEnd;
+  }
+  if (cursor < displayEnd) return skip('样式范围没有覆盖完整文本');
+  if (fonts.size > 1) return skip('同一文字层使用了多个字体');
+  return fonts.size === 1 ? { fontPostScriptName: [...fonts][0] } : {};
+}
+
+function readTextRenderValue(textDescriptor, plainValue, layerEffects, descriptor) {
+  const source = textDescriptor && textDescriptor.textKey;
+  const ranges = textDescriptor && textDescriptor.textStyleRange;
+  if (typeof source !== 'string' || !Array.isArray(ranges) || ranges.length < 2) return {};
+  const colors = ranges.map((range) => rgbStyleColor(range && range.textStyle));
+  const knownColors = new Set(colors.filter(Boolean));
+  const skip = (reason) => ({ renderWarning: `混色文字未生成 Unity 富文本：${reason}；请检查该文字层或拆成独立文字层。` });
+  if (knownColors.size === 0) {
+    const rawColors = new Set(ranges.map((range) => JSON.stringify(styleColorDescriptor(range && range.textStyle))));
+    return rawColors.size > 1 ? skip('逐字颜色不同，但没有可用的 RGB 字色') : {};
+  }
+  if (knownColors.size === 1 && colors.every(Boolean)) return {};
+  if (activeFillEffect(layerEffects, descriptor)) return skip('图层填充效果可能覆盖逐字颜色');
+  const normalized = normalizedTextWithBoundaries(source);
+  let displayEnd = source.length;
+  if (normalized.value !== plainValue) {
+    // Photoshop can keep one terminal paragraph marker in textKey after the DOM contents ends.
+    const terminalLength = source.endsWith('\r\n') ? 2 : source.endsWith('\r') ? 1 : 0;
+    const candidateEnd = source.length - terminalLength;
+    if (!terminalLength || normalized.value.slice(0, normalized.boundaries[candidateEnd]) !== plainValue) {
+      return skip('Photoshop 文字描述符与显示文本不一致');
+    }
+    displayEnd = candidateEnd;
+  }
+  if (source.includes('<')) return skip('原文包含可能被 Unity 识别为标签的 < 字符');
+  const ordered = ranges.slice().sort((left, right) => Number(left.from) - Number(right.from));
+  const segments = [];
+  let cursor = 0;
+  for (let index = 0; index < ordered.length; index += 1) {
+    const range = ordered[index];
+    const from = Number(range.from);
+    const to = Number(range.to);
+    const last = index === ordered.length - 1;
+    if (!Number.isInteger(from) || !Number.isInteger(to) || from !== cursor || to <= from
+        || to > source.length + (last ? 1 : 0)) return skip('样式范围索引不连续或越界');
+    const rawEnd = Math.min(to, source.length);
+    const start = Math.min(from, displayEnd);
+    const end = Math.min(rawEnd, displayEnd);
+    if (normalized.boundaries[start] == null || normalized.boundaries[end] == null
+        || splitsSurrogatePair(source, start) || splitsSurrogatePair(source, end)) {
+      return skip('样式范围切开了换行或 Unicode 字符');
+    }
+    const part = normalized.value.slice(normalized.boundaries[start], normalized.boundaries[end]);
+    if (part) {
+      const color = rgbStyleColor(range.textStyle);
+      if (!color) return skip('某一段缺少可继承的 RGB 字色');
+      const previous = segments[segments.length - 1];
+      if (previous && previous.color === color) previous.value += part;
+      else segments.push({ color, value: part });
+    }
+    cursor = rawEnd;
+  }
+  if (cursor < displayEnd) return skip('样式范围没有覆盖完整文本');
+  if (new Set(segments.map((segment) => segment.color)).size < 2) return {};
+  return { renderValue: segments.map((segment) => `<color=${segment.color}>${segment.value}</color>`).join('') };
 }
 
 function readText(layer, layerEffects, textDescriptor, descriptor = {}) {
@@ -192,8 +380,11 @@ function readText(layer, layerEffects, textDescriptor, descriptor = {}) {
       }
       : null;
     const metrics = readTextMetrics({ size: characterStyle.size || textItem.fontSize, leading: characterStyle.leading }, textDescriptor);
+    const value = String(textItem.contents || '').replace(/\r\n?/g, '\n');
     return {
-      value: String(textItem.contents || '').replace(/\r\n?/g, '\n'),
+      value,
+      ...readTextRenderValue(textDescriptor, value, layerEffects, descriptor),
+      ...readTextFontPostScriptName(textDescriptor, value),
       fontSize: metrics.fontSize,
       alignment: mapTextAlignment(paragraphStyle.justification),
       lineSpacing: metrics.lineSpacing,
@@ -237,10 +428,28 @@ function readStyleSignature(layer) {
 }
 
 function readLayer(layer) {
+  // 返回独立值，调用方修改快照不会污染后续选区或导出。
+  const cache = projectionCache();
+  const result = projectLayer(layer, cache);
+  return cache ? copyProjection(result) : result;
+}
+
+function copyProjection(value) {
+  if (!value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(copyProjection);
+  const copy = {};
+  Object.keys(value).forEach(key => { copy[key] = copyProjection(value[key]); });
+  return copy;
+}
+
+function projectLayer(layer, cache) {
+  const revision = typeof core.getLayerRevision === 'function' ? core.getLayerRevision(layer) : projectionRevision;
+  const cached = cache && cache.get(layer);
+  if (revision != null && cached && cached.revision === revision) return cached.value;
   const children = [];
   const layers = layer.layers || [];
   for (let index = 0; index < layers.length; index += 1) {
-    children.push(readLayer(layers[index]));
+    children.push(projectLayer(layers[index], cache));
   }
   const opacity = Number(layer.opacity);
   const isText = layerKind(layer) === 'text';
@@ -258,12 +467,13 @@ function readLayer(layer) {
   const textSource = textDescriptor ? {
     transform: textDescriptor.transform || null,
     styles: (textDescriptor.textStyleRange || []).map((range) => ({
-      from: range.from, to: range.to, fontPostScriptName: range.textStyle && range.textStyle.fontPostScriptName,
+      from: range.from, to: range.to, fontPostScriptName: styleFontPostScriptName(range.textStyle),
       fontAvailable: range.textStyle && range.textStyle.fontAvailable,
-      size: range.textStyle && range.textStyle.size, impliedFontSize: range.textStyle && range.textStyle.impliedFontSize
+      size: range.textStyle && range.textStyle.size, impliedFontSize: range.textStyle && range.textStyle.impliedFontSize,
+      color: rgbStyleColor(range.textStyle)
     }))
   } : null;
-  return {
+  const result = {
     layerId: String(layer.id),
     parentId: layer.parent && layer.parent.id != null ? String(layer.parent.id) : '',
     name: String(layer.name || `Layer-${layer.id}`),
@@ -277,6 +487,8 @@ function readLayer(layer) {
     styleSignature: JSON.stringify({ base: readStyleSignature(layer), effects: effectsDescriptor, textSource }),
     children
   };
+  if (cache && revision != null) cache.set(layer, { revision, value: result });
+  return result;
 }
 
 function findLayerById(layers, layerId) {
@@ -302,8 +514,8 @@ function getActiveLayersInfo() {
   if (selectedIds.size === 0) {
     throw new Error('请先选择一个或多个 Photoshop 图层。');
   }
-  const orderedLayers = [];
-  flattenLayers(document.layers || [], orderedLayers);
+  const orderedLayers = selectedIds.size === 1 ? Array.from(document.activeLayers) : [];
+  if (selectedIds.size > 1) flattenLayers(document.layers || [], orderedLayers);
   return orderedLayers
     .filter((layer) => selectedIds.has(String(layer.id)))
     .map((layer) => {
@@ -343,9 +555,11 @@ function createSnapshot(rootLayerId) {
 
 function getDocumentInfo() {
   const document = requireDocument();
+  const path = String(document.path);
+  const fileName = path.split(/[\\/]/).pop();
   return {
-    name: String(document.title || 'UI').replace(/\.psd$/i, ''),
-    path: String(document.path),
+    name: String(fileName || document.title || 'UI').replace(/\.(psd|psb)$/i, ''),
+    path,
     width: asNumber(document.width),
     height: asNumber(document.height)
   };
@@ -426,13 +640,11 @@ async function selectLayersById(layerIds) {
     if (!findLayerById(document.layers || [], id)) throw new Error(`问题图层 ${id} 已不存在，请重新检查。`);
   });
   await core.executeAsModal(async () => {
-    for (let index = 0; index < ids.length; index += 1) {
-      await action.batchPlay([{
-        _obj: 'select', _target: [{ _ref: 'layer', _id: Number(ids[index]) }],
-        ...(index > 0 ? { selectionModifier: { _enum: 'selectionModifierType', _value: 'addToSelection' } } : {}),
-        makeVisible: false, _options: { dialogOptions: 'dontDisplay' }
-      }], {});
-    }
+    await action.batchPlay(ids.map((id, index) => ({
+      _obj: 'select', _target: [{ _ref: 'layer', _id: Number(id) }],
+      ...(index > 0 ? { selectionModifier: { _enum: 'selectionModifierType', _value: 'addToSelection' } } : {}),
+      makeVisible: false, _options: { dialogOptions: 'dontDisplay' }
+    })), {});
   }, { commandName: 'PSD2UI：定位图层' });
   return { layerIds: ids };
 }

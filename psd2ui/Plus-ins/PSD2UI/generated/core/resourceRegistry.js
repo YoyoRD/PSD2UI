@@ -170,6 +170,13 @@ function allocateSourceResource(manifest, input, options) {
   if (existing && existing.status !== 'active') {
     fail('PSD2UI_RESOURCE_RETIRED', `图层 ${layerId} 绑定的资源已停用。`);
   }
+  if (existing && existing.exportSourceLayerId != null
+      && String(existing.exportSourceLayerId) === layerId && existing.fileName !== parsed.fileName) {
+    // 自动登记不能改写人工指定的源图身份；先明确换源或取消共享再接纳新名称。
+    fail('PSD2UI_SHARED_SLICE_SOURCE_INVALID',
+      `共用九宫 '${existing.fileName}' 的指定源图 ${layerId} 已改名，请重新指定源图。`,
+      { resourceId: existing.id, layerId });
+  }
   if (existing && existing.fileName === parsed.fileName && existing.kind === kind) {
     existing.module = parsed.group;
     existing.scope = 'module';
@@ -228,7 +235,7 @@ function allocateSourceResource(manifest, input, options) {
     existing = null;
   }
   if (collision) {
-    // 同名只登记候选来源；导出器逐层比较实际像素后才能交付共享资源。
+    // 同名登记全部来源；导出器核对类型、描述尺寸和九宫边距后复用代表图。
     collision.module = parsed.group;
     collision.scope = 'module';
     collision.kind = kind;

@@ -33,8 +33,18 @@
 
 ## 尚未交付
 
-本次没有生成或发布新的签名 ZXP、安装 ZIP、CCX，也没有创建 GitHub Release。CEP 的预生成面板已随源码保留；README 提供直接开发加载和维护者打包路径。CCX 使用 Adobe UDT 打包。若 Releases 没有附件，应按源码步骤运行，不把 GitHub 的 Source code ZIP 当作插件安装包。
+首次迁移没有生成或发布新的签名 ZXP、安装 ZIP、CCX，也没有创建 GitHub Release。CEP 的预生成面板已随源码保留；README 提供维护者签名打包路径。CCX 使用 Adobe UDT 打包。若 Releases 没有附件，应按源码步骤运行，不把 GitHub 的 Source code ZIP 当作插件安装包。
 
 源仓库未提供本次可直接沿用的项目级 LICENSE；本次没有代作者选择新的授权协议。CEP 所含 pngjs 的第三方许可证原样保留，新增项目级许可证仍由维护者决定。
 
 Unity 缺口与实现顺序见 [Unity 接入](UNITY-INTEGRATION.md)。当前交付结果是文件迁移，未声明功能、视觉或跨版本兼容已验证。
+
+## 2026-09-26 CEP 后续同步
+
+公开仓库继续保持 **main = CEP、ccx = UXP/CCX**。main 从源仓库 `origin/codex/cep9-migration` 的 `fd25502246bb6ca95fb9ab7ad3b06324a20ff3a2` 同步到 CEP 0.4.6；源仓库 UXP 分支 `origin/main` 仍为上表提交，因此本轮不修改公开仓库 ccx。
+
+同步范围为 CEP 宿主、共享面板及其预生成文件、Core、Schema、对应 Core/UXP/CEP 测试源和通用打包脚本。详细文件与 SHA-256 见 [同步清单](sync-manifest.json)。继续排除整个 Adapters、Tests/Adapters、Unity 项目脚本、私有项目路径和验收样例。源仓库的内部同步/性能记录没有直接搬入公开文档。
+
+唯一的源码适配是将公开版 `scripts/package-cep.ps1` 的默认输出从内部美术目录改为仓库内 `psd2ui/dist`；其余同步代码保持源提交内容（Windows 工作区行尾转换不改变代码语义）。CEP 新版直接交付平铺的签名安装目录，不再按旧说明输出外层 ZIP。README、安装说明、数据契约和 Skill 操作参考已相应更新；历史迁移清单仍记录 2026-09-12 的原始基线，不代表当前文件哈希。
+
+本轮没有运行构建、签名打包、测试或 Photoshop/Unity 实机操作。源仓库历史验证与本次公开同步的结果分别看待；使用目标 Photoshop 时仍须自行确认面板加载、配置保存和 JSON/PNG 导出。

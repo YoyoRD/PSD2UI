@@ -62,7 +62,7 @@ async function startCommandServer(options) {
         json(response, 403, { error: '本地插件连接凭据无效。' }); return;
       }
       if (request.method === 'GET' && request.url === '/status') {
-        json(response, 200, { protocol: Protocol, pluginId: PluginId, pluginVersion: '0.3.8',
+        json(response, 200, { protocol: Protocol, pluginId: PluginId, pluginVersion: '0.4.6',
           transport: 'cep', instanceId, methods: AllowedMethods, ...input.status && input.status() }); return;
       }
       const match = /^\/operations\/([a-zA-Z0-9_-]{8,100})$/.exec(request.url || '');
